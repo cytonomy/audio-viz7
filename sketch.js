@@ -55,7 +55,7 @@ const entityHomes = {
   synth: { x:  0.3, y: -0.15, z: -0.3 },
   pad:   { x: -0.3, y: -0.25, z: -0.15 }
 };
-const BURST_JITTER_FRAC = 0.12;     // fraction of grid half-extent
+const BURST_JITTER_FRAC = 0.28;     // fraction of grid half-extent — visible spread
 
 function setup() {
   createCanvas(windowWidth, windowHeight, WEBGL);
@@ -132,18 +132,17 @@ function _spawnBandBurst(bandIdx, intensity) {
   const cx = (VOXEL_GRID - 1) / 2;
   const cy = (VOXEL_GRID - 1) / 2;
   const cz = (VOXEL_GRID - 1) / 2;
-  // Soma position: on a ring at angle = bandIdx / 14 * 2π. Radius randomized
-  // ±20% so each band-burst lands somewhere new on its arc.
+  // Soma position: angular ring (color-wheel layout) with wide ±0.6 rad
+  // jitter so the band can land anywhere within roughly half its sector.
+  // Radius spans 30%-90% of the cube — sometimes deep in the core, sometimes
+  // out near the shell. Each burst lands somewhere noticeably different.
   const angle = (bandIdx / frequencyRanges.length) * Math.PI * 2
-              + (Math.random() - 0.5) * 0.35;
+              + (Math.random() - 0.5) * 1.2;
   const baseR = (VOXEL_GRID / 2 - 2);
-  const radius = baseR * (0.55 + Math.random() * 0.4);
-  // Vertical stratification by group (bass low, mid mid, high high) +
-  // jitter per spawn. Jitter scales with grid so it stays "a bit fuzzy"
-  // not "exact same row" at high resolution.
-  const yJ = Math.max(2, Math.round(VOXEL_GRID * 0.12));
-  const yOffset = r.group === "bass" ? Math.round(VOXEL_GRID * 0.18)
-                : r.group === "high" ? -Math.round(VOXEL_GRID * 0.18) : 0;
+  const radius = baseR * (0.3 + Math.random() * 0.65);
+  const yJ = Math.max(3, Math.round(VOXEL_GRID * 0.25));
+  const yOffset = r.group === "bass" ? Math.round(VOXEL_GRID * 0.15)
+                : r.group === "high" ? -Math.round(VOXEL_GRID * 0.15) : 0;
   const sx = _clamp(Math.round(cx + Math.cos(angle) * radius));
   const sy = _clamp(Math.round(cy + yOffset + (Math.random() - 0.5) * yJ));
   const sz = _clamp(Math.round(cz + Math.sin(angle) * radius));
@@ -157,7 +156,7 @@ function _spawnBandBurst(bandIdx, intensity) {
       intensity,
       lifespan: r.group === "bass" ? 110 : r.group === "high" ? 55 : 80,
       apFrames: r.group === "bass" ? 26 : r.group === "high" ? 14 : 18,
-      treeLen: Math.round((r.group === "bass" ? 110 : r.group === "high" ? 60 : 85) * _GRID_TREE_SCALE)
+      targetNodes: Math.round((r.group === "bass" ? 130 : r.group === "high" ? 70 : 100) * _GRID_TREE_SCALE)
     }
   );
 }
@@ -183,7 +182,8 @@ function _spawnEntityBurst(name, intensity) {
   const sx = _clamp(Math.round(cx + h.x * half + (Math.random() - 0.5) * jit * 2));
   const sy = _clamp(Math.round(cy + h.y * half + (Math.random() - 0.5) * jit * 2));
   const sz = _clamp(Math.round(cz + h.z * half + (Math.random() - 0.5) * jit * 2));
-  const soma = entityPalette[name];
+  const somaPos = { x: sx, y: sy, z: sz };
+  const somaColor = entityPalette[name];
   // Pick a v6 palette color as the secondary — random per spawn so each
   // burst's diffusion picks a different neighbor hue. Gives each kick (etc.)
   // a unique color signature without losing its primary identity.
@@ -191,22 +191,22 @@ function _spawnEntityBurst(name, intensity) {
   // Per-entity tuning: kick is slow + chunky, hat is fast + thin, etc.
   // treeLen scales with _GRID_TREE_SCALE so density stays consistent.
   const profiles = {
-    kick:  { lifespan: 95,  apFrames: 22, treeLen: 95 },
-    snare: { lifespan: 65,  apFrames: 16, treeLen: 75 },
-    hat:   { lifespan: 38,  apFrames: 10, treeLen: 50 },
-    voice: { lifespan: 80,  apFrames: 24, treeLen: 90 },
-    brass: { lifespan: 90,  apFrames: 28, treeLen: 100 },
-    synth: { lifespan: 110, apFrames: 32, treeLen: 110 },
-    pad:   { lifespan: 140, apFrames: 40, treeLen: 110 }
+    kick:  { lifespan: 95,  apFrames: 22, nodes: 130 },
+    snare: { lifespan: 65,  apFrames: 16, nodes: 95  },
+    hat:   { lifespan: 38,  apFrames: 10, nodes: 70  },
+    voice: { lifespan: 80,  apFrames: 24, nodes: 110 },
+    brass: { lifespan: 90,  apFrames: 28, nodes: 120 },
+    synth: { lifespan: 110, apFrames: 32, nodes: 130 },
+    pad:   { lifespan: 140, apFrames: 40, nodes: 140 }
   };
   const prof = profiles[name];
-  spawnBurst(soma, soma, sec, {
+  spawnBurst(somaPos, somaColor, sec, {
     kind: "entity",
     label: name,
     intensity,
     lifespan: prof.lifespan,
     apFrames: prof.apFrames,
-    treeLen: Math.round(prof.treeLen * _GRID_TREE_SCALE)
+    targetNodes: Math.round(prof.nodes * _GRID_TREE_SCALE)
   });
 }
 
