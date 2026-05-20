@@ -1,16 +1,41 @@
 // visual/render.js — WEBGL voxel point-cloud renderer.
-// Per-frame iterates every voxel, skips ones below threshold, draws bright dot
-// + bloom halo + (optional) hot-white center for the brightest voxels.
-// Ported from volumetric-led/sketch.js:1402-1498 with cleanup.
+// Two-stage pipeline:
+//   1. Pre-filter: iterate the full voxel grid once, build a tight list of
+//      lit voxels (typically ~500-2000 of 32768 at GRID=32). If the list
+//      exceeds MAX_RENDER_VOXELS, sort by brightness and keep only the top N.
+//      Bounds the expensive WebGL draw-call count regardless of grid size.
+//   2. Render: per lit voxel, stack four additive-blended passes —
+//        a) outer atmospheric glow (wide, very low alpha) — fires on every
+//           lit voxel, so the whole field has a soft volumetric haze even
+//           when most voxels are dim
+//        b) inner bloom halo (medium width, low alpha) — gates above
+//           RENDER_BLOOM_THRESH
+//        c) core bright dot
+//        d) hot-white peak — only for the brightest voxels (AP heads)
+// Ported and extended from volumetric-led/sketch.js:1402-1498.
 
-const RENDER_BG = [4, 4, 8];                  // background fill (dark navy)
-const RENDER_BLOOM_THRESH = 0.12;
-const RENDER_CORE_THRESH = 0.025;
-const RENDER_HOT_THRESH = 0.55;
+const RENDER_BG = [4, 4, 8];
+const RENDER_BLOOM_THRESH = 0.06;       // bloom now fires for nearly all lit voxels
+const RENDER_CORE_THRESH  = 0.018;      // global "is this voxel worth drawing"
+const RENDER_HOT_THRESH   = 0.55;       // hot-white peak only for AP heads
+const MAX_RENDER_VOXELS   = 1800;       // hard cap on draw budget per frame
 
-// Apply the additive blend GL state so glow stacks naturally instead of
-// occluding. Restore default blend at end of pass.
-function renderVoxels(p, hideBand) {
+// Reusable scratch buffer — avoid GC pressure by holding a flat lit-list
+// across frames. Each entry is 5 contiguous numbers: [voxIdx, brightness,
+// r, g, b]. Indexing this way is much faster than {} per voxel.
+const _litBuf = new Float32Array(MAX_RENDER_VOXELS * 5);
+let _litCount = 0;
+// Adaptive brightness threshold. Starts at RENDER_CORE_THRESH and creeps
+// upward whenever a frame fills the lit-buffer to capacity (so the dimmest
+// voxels get culled first instead of the youngest-by-iteration-order). When
+// frames run well under capacity, it relaxes back toward the base. Result:
+// over-cap moments cull dim background haze rather than chopping bright
+// AP heads, and the budget stays bounded regardless of grid size.
+let _dynThresh = RENDER_CORE_THRESH;
+const _BASE_THRESH = RENDER_CORE_THRESH;
+const _MAX_THRESH = 0.45;
+
+function renderVoxels(p, _hideBandUnused) {
   const gl = p.drawingContext;
   gl.disable(gl.DEPTH_TEST);
   gl.enable(gl.BLEND);
@@ -21,59 +46,86 @@ function renderVoxels(p, hideBand) {
   const half = G / 2;
   const N = VOXEL_COUNT;
 
-  p.noFill();
+  // ─── Stage 1: prefilter to lit voxels with adaptive threshold ───
+  let count = 0;
+  const buf = _litBuf;
+  const breath = (0.3 + globalBreath * 0.7);
+  const cap = MAX_RENDER_VOXELS;
+  const thresh = _dynThresh;
 
-  // Single merged pass: bloom halo + core dot + hot-white peak per voxel.
-  // Iterating once over the flat array and computing xyz from the index is
-  // measurably faster than triple-nested loops in the JIT.
   for (let i = 0; i < N; i++) {
     const structure = voxStructure[i];
     const signal = voxSignal[i];
-    // Cheap visual "breath" — scale structure brightness a touch with
-    // global volume so quiet passages dim the dendrite skeleton.
-    const b = Math.min(1, structure * (0.3 + globalBreath * 0.7) + signal);
-    if (b < RENDER_CORE_THRESH) continue;
+    if (structure === 0 && signal === 0) continue;     // fast reject zero voxels
+    let b = structure * breath + signal;
+    if (b > 1) b = 1;
+    if (b < thresh) continue;
 
-    const ci = i * 3;
-    let r = voxColor[ci];
-    let g = voxColor[ci + 1];
-    let bl = voxColor[ci + 2];
-
-    // Hide-band toggle: skip voxels whose owning color matches a band entry
-    // (entity voxels have entityPalette colors, never matching a band rgb
-    // exactly because we paint first-painter-wins). Approximation, not exact.
-    if (hideBand && structure > signal * 0.5) {
-      // entity colors all have at least one channel >= 200 from entityPalette;
-      // bands are HSL-derived, often more balanced. Quick heuristic: skip if
-      // owning voxel was painted by a band neuron (max channel < 220 typical).
-      const maxCh = Math.max(r, g, bl);
-      if (maxCh < 215) continue;
+    if (count < cap) {
+      const w = count * 5;
+      const ci = i * 3;
+      buf[w]     = i;
+      buf[w + 1] = b;
+      buf[w + 2] = voxColor[ci];
+      buf[w + 3] = voxColor[ci + 1];
+      buf[w + 4] = voxColor[ci + 2];
+      count++;
     }
+    // else: skip and let _dynThresh climb next frame so the dimmest go first
+  }
 
-    // Compute (x,y,z) from flat index. Layout: idx = z*G² + y*G + x.
-    const z = (i / (G * G)) | 0;
-    const rem = i - z * G * G;
+  // Adaptive feedback: climb threshold when at capacity (dim voxels culled
+  // before bright ones), relax when well under capacity (no wasted budget).
+  // 8% per frame converges in ~10 frames (~170ms) — fast enough to hide
+  // the transition during sudden burst floods, slow enough not to flicker.
+  if (count >= cap) {
+    _dynThresh = Math.min(_MAX_THRESH, _dynThresh * 1.08);
+  } else if (count < cap * 0.55) {
+    _dynThresh = Math.max(_BASE_THRESH, _dynThresh * 0.92);
+  }
+  _litCount = count;
+
+  // ─── Stage 2: render ────────────────────────────────────────────
+  p.noFill();
+
+  for (let i = 0; i < count; i++) {
+    const w = i * 5;
+    const vi = buf[w] | 0;
+    const b = buf[w + 1];
+    const r = buf[w + 2];
+    const g = buf[w + 3];
+    const bl = buf[w + 4];
+
+    // (x,y,z) from flat index, layout z*G² + y*G + x
+    const z = (vi / (G * G)) | 0;
+    const rem = vi - z * G * G;
     const y = (rem / G) | 0;
     const x = rem - y * G;
     const px = (x - half + 0.5) * S;
     const py = (y - half + 0.5) * S;
     const pz = (z - half + 0.5) * S;
 
-    // Bloom halo — big soft point with low alpha.
+    // Pass A — outer atmospheric glow. Always fires for lit voxels. Wide,
+    // very low alpha. Multiple overlapping atmospheric glows additively
+    // accumulate into a soft volumetric haze around dense burst regions.
+    p.strokeWeight(b * 24 + 9);
+    p.stroke(r, g, bl, b * 16);
+    p.point(px, py, pz);
+
+    // Pass B — inner bloom halo. Medium width, moderate alpha.
     if (b >= RENDER_BLOOM_THRESH) {
-      p.strokeWeight(b * 16 + 4);
-      p.stroke(r, g, bl, b * 32);
+      p.strokeWeight(b * 13 + 4);
+      p.stroke(r, g, bl, b * 38);
       p.point(px, py, pz);
     }
 
-    // Core bright dot.
+    // Pass C — core bright dot.
     const coreSize = 2 + b * 4;
-    const alpha = 60 + b * 195;
     p.strokeWeight(coreSize);
-    p.stroke(r, g, bl, alpha);
+    p.stroke(r, g, bl, 60 + b * 195);
     p.point(px, py, pz);
 
-    // Hot-white peak — only for the brightest voxels (action-potential heads).
+    // Pass D — hot white peak (AP heads).
     if (b > RENDER_HOT_THRESH) {
       const wb = (b - RENDER_HOT_THRESH) / (1 - RENDER_HOT_THRESH);
       p.strokeWeight(coreSize * 0.45);
@@ -87,11 +139,11 @@ function renderVoxels(p, hideBand) {
     }
   }
 
-  // Restore default blend + depth so the cube wireframe and HUD render right.
+  // Restore default blend + depth so enclosure wireframe & HUD render right.
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   gl.enable(gl.DEPTH_TEST);
 
-  // Faint enclosure wireframe — anchors the eye, reads as the "LED cube" shell.
+  // Faint enclosure wireframe — the "LED cube" shell anchor.
   p.push();
   p.noFill();
   p.stroke(28, 28, 36);
@@ -100,3 +152,6 @@ function renderVoxels(p, hideBand) {
   p.box(total, total, total);
   p.pop();
 }
+
+function renderLitCount() { return _litCount; }
+function renderDynamicThreshold() { return _dynThresh; }

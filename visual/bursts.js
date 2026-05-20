@@ -12,7 +12,9 @@
 
 const BURSTS = [];                  // live bursts; sketch.js culls dead ones each frame
 const BURST_CAP = 80;               // hard cap; oldest culled when over
-const DEFAULT_BURST_LEN = 90;       // dendrite-walk steps (deduped to ~50-70 voxels)
+// Tree-walk length scales with grid resolution so dendrite density looks
+// consistent at any grid size. At GRID=16 → 80 steps; at GRID=32 → 160.
+const DEFAULT_BURST_LEN = Math.max(60, Math.round(VOXEL_GRID * 5));
 let burstRng = 0xB17C;
 
 function burstRand() {

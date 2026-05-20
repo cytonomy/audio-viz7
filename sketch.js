@@ -42,19 +42,20 @@ const entityLastSpawn = {
 };
 let frameTickV7 = 0;                 // local frame counter independent of p5's
 
-// Entity spawn home positions (relative to cube center). Each spawn jitters
-// ±BURST_JITTER voxels so each kick burst (etc.) lands in a different exact
-// spot — visual variety without losing the "kick lives down here" identity.
+// Entity spawn home positions, expressed as FRACTIONS of grid half-extent so
+// the layout scales with resolution. Multiplied by VOXEL_GRID/2 at spawn.
+// Each spawn jitters by ~12% of the grid so two kicks never land on the same
+// voxel — keeps visual variety without losing "kick lives down here" identity.
 const entityHomes = {
-  kick:  { x:  0, y:  3, z:  0 },
-  snare: { x:  3, y:  1, z:  0 },
-  hat:   { x:  0, y: -3, z:  3 },
-  voice: { x:  0, y:  0, z: -3 },
-  brass: { x: -3, y:  0, z:  2 },
-  synth: { x:  2, y: -1, z: -2 },
-  pad:   { x: -2, y: -2, z: -1 }
+  kick:  { x:  0.0, y:  0.4, z:  0.0 },
+  snare: { x:  0.4, y:  0.15, z:  0.0 },
+  hat:   { x:  0.0, y: -0.4, z:  0.4 },
+  voice: { x:  0.0, y:  0.0, z: -0.4 },
+  brass: { x: -0.4, y:  0.0, z:  0.3 },
+  synth: { x:  0.3, y: -0.15, z: -0.3 },
+  pad:   { x: -0.3, y: -0.25, z: -0.15 }
 };
-const BURST_JITTER = 2;
+const BURST_JITTER_FRAC = 0.12;     // fraction of grid half-extent
 
 function setup() {
   createCanvas(windowWidth, windowHeight, WEBGL);
@@ -121,6 +122,10 @@ function spawnFromBands() {
   }
 }
 
+// All tree lengths scale with grid resolution so the visual density of a
+// burst stays consistent regardless of how many LEDs the cube has.
+const _GRID_TREE_SCALE = VOXEL_GRID / 16;       // 1 at GRID=16, 2 at GRID=32
+
 function _spawnBandBurst(bandIdx, intensity) {
   const r = frequencyRanges[bandIdx];
   const neighbor = frequencyRanges[(bandIdx + 1) % frequencyRanges.length];
@@ -134,10 +139,13 @@ function _spawnBandBurst(bandIdx, intensity) {
   const baseR = (VOXEL_GRID / 2 - 2);
   const radius = baseR * (0.55 + Math.random() * 0.4);
   // Vertical stratification by group (bass low, mid mid, high high) +
-  // small jitter per spawn.
-  const yBase = r.group === "bass" ? cy + 3 : r.group === "high" ? cy - 3 : cy;
+  // jitter per spawn. Jitter scales with grid so it stays "a bit fuzzy"
+  // not "exact same row" at high resolution.
+  const yJ = Math.max(2, Math.round(VOXEL_GRID * 0.12));
+  const yOffset = r.group === "bass" ? Math.round(VOXEL_GRID * 0.18)
+                : r.group === "high" ? -Math.round(VOXEL_GRID * 0.18) : 0;
   const sx = _clamp(Math.round(cx + Math.cos(angle) * radius));
-  const sy = _clamp(Math.round(yBase + (Math.random() - 0.5) * 4));
+  const sy = _clamp(Math.round(cy + yOffset + (Math.random() - 0.5) * yJ));
   const sz = _clamp(Math.round(cz + Math.sin(angle) * radius));
   spawnBurst(
     { x: sx, y: sy, z: sz },
@@ -149,7 +157,7 @@ function _spawnBandBurst(bandIdx, intensity) {
       intensity,
       lifespan: r.group === "bass" ? 110 : r.group === "high" ? 55 : 80,
       apFrames: r.group === "bass" ? 26 : r.group === "high" ? 14 : 18,
-      treeLen: r.group === "bass" ? 110 : r.group === "high" ? 60 : 85
+      treeLen: Math.round((r.group === "bass" ? 110 : r.group === "high" ? 60 : 85) * _GRID_TREE_SCALE)
     }
   );
 }
@@ -167,24 +175,27 @@ function spawnFromEntities(fires) {
 
 function _spawnEntityBurst(name, intensity) {
   const h = entityHomes[name];
+  const half = VOXEL_GRID / 2;
   const cx = (VOXEL_GRID - 1) / 2;
   const cy = (VOXEL_GRID - 1) / 2;
   const cz = (VOXEL_GRID - 1) / 2;
-  const sx = _clamp(Math.round(cx + h.x + (Math.random() - 0.5) * BURST_JITTER));
-  const sy = _clamp(Math.round(cy + h.y + (Math.random() - 0.5) * BURST_JITTER));
-  const sz = _clamp(Math.round(cz + h.z + (Math.random() - 0.5) * BURST_JITTER));
+  const jit = half * BURST_JITTER_FRAC;
+  const sx = _clamp(Math.round(cx + h.x * half + (Math.random() - 0.5) * jit * 2));
+  const sy = _clamp(Math.round(cy + h.y * half + (Math.random() - 0.5) * jit * 2));
+  const sz = _clamp(Math.round(cz + h.z * half + (Math.random() - 0.5) * jit * 2));
   const soma = entityPalette[name];
   // Pick a v6 palette color as the secondary — random per spawn so each
   // burst's diffusion picks a different neighbor hue. Gives each kick (etc.)
   // a unique color signature without losing its primary identity.
   const sec = frequencyRanges[Math.floor(Math.random() * frequencyRanges.length)].rgb;
   // Per-entity tuning: kick is slow + chunky, hat is fast + thin, etc.
+  // treeLen scales with _GRID_TREE_SCALE so density stays consistent.
   const profiles = {
-    kick:  { lifespan: 95, apFrames: 22, treeLen: 95 },
-    snare: { lifespan: 65, apFrames: 16, treeLen: 75 },
-    hat:   { lifespan: 38, apFrames: 10, treeLen: 50 },
-    voice: { lifespan: 80, apFrames: 24, treeLen: 90 },
-    brass: { lifespan: 90, apFrames: 28, treeLen: 100 },
+    kick:  { lifespan: 95,  apFrames: 22, treeLen: 95 },
+    snare: { lifespan: 65,  apFrames: 16, treeLen: 75 },
+    hat:   { lifespan: 38,  apFrames: 10, treeLen: 50 },
+    voice: { lifespan: 80,  apFrames: 24, treeLen: 90 },
+    brass: { lifespan: 90,  apFrames: 28, treeLen: 100 },
     synth: { lifespan: 110, apFrames: 32, treeLen: 110 },
     pad:   { lifespan: 140, apFrames: 40, treeLen: 110 }
   };
@@ -195,7 +206,7 @@ function _spawnEntityBurst(name, intensity) {
     intensity,
     lifespan: prof.lifespan,
     apFrames: prof.apFrames,
-    treeLen: prof.treeLen
+    treeLen: Math.round(prof.treeLen * _GRID_TREE_SCALE)
   });
 }
 
@@ -213,7 +224,8 @@ function _renderEntityBars() {
     const dim = "·".repeat(12 - bars);
     return `<div><span class="name">${n.toUpperCase()}</span> <span class="lit">${lit}</span><span class="bar">${dim}</span></div>`;
   });
-  lines.push(`<div style="margin-top:6px;color:#444;">bursts ${BURSTS.length}/${BURST_CAP}</div>`);
+  const litCount = typeof renderLitCount === "function" ? renderLitCount() : 0;
+  lines.push(`<div style="margin-top:6px;color:#444;">bursts ${BURSTS.length}/${BURST_CAP} · lit ${litCount}/${MAX_RENDER_VOXELS}</div>`);
   entitiesEl.innerHTML = lines.join("");
 }
 

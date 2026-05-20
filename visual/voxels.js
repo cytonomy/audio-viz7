@@ -6,19 +6,25 @@
 // Each frame, every voxel reads structure[vi] + signal[vi] and the renderer
 // turns the sum into a colored, bloomed dot.
 
-const VOXEL_GRID = 16;                // 16³ = 4096 LEDs (proven default)
-const VOXEL_SPACING = 22;
+// Grid resolution. 32³ = 32768 voxels — 8× denser than the v7.0 default.
+// SPACING auto-scales so the on-screen cube stays roughly the same physical
+// size regardless of grid; the renderer's lit-voxel pre-filter keeps per-
+// frame draw cost bounded even at this resolution.
+const VOXEL_GRID = 32;
+const VOXEL_SPACING = Math.max(6, Math.floor(350 / VOXEL_GRID));   // ≈11 at GRID=32
 const VOXEL_COUNT = VOXEL_GRID * VOXEL_GRID * VOXEL_GRID;
 
-// Allocated by initVoxels(), referenced from sketch.js / render.js / neurons.js
+// Allocated by initVoxels(), referenced from sketch.js / render.js / bursts.js.
+// voxColor uses Uint8Array — RGB are 0..255 anyway, so this is a 4× memory
+// cut vs Float32Array (96 KB instead of 384 KB at GRID=32) and equally fast.
 let voxStructure;   // per-voxel dendrite intensity, 0..1
 let voxSignal;      // per-voxel action potential intensity, 0..1
-let voxColor;       // Float32Array[VOXEL_COUNT * 3] precomputed RGB per voxel (from owning neuron)
+let voxColor;       // Uint8Array[VOXEL_COUNT * 3] RGB per voxel (last burst wins)
 
 function initVoxels() {
   voxStructure = new Float32Array(VOXEL_COUNT);
   voxSignal    = new Float32Array(VOXEL_COUNT);
-  voxColor     = new Float32Array(VOXEL_COUNT * 3);
+  voxColor     = new Uint8Array(VOXEL_COUNT * 3);
 }
 
 // Flat-index helper. Matches volumetric-led layout: idx = z*G² + y*G + x.
@@ -46,12 +52,11 @@ function decayVoxels() {
   }
 }
 
-// Paint a voxel with a neuron's color. Called once when a dendrite tree is
-// built so each voxel knows which neuron "owns" it for color purposes; later
-// fires just modulate brightness without rewriting color.
+// Paint a voxel with a burst's per-step color. Last writer wins, so
+// overlapping bursts visibly recolor shared voxels.
 function paintVoxelColor(vi, rgb) {
   const ci = vi * 3;
-  voxColor[ci]     = rgb[0];
-  voxColor[ci + 1] = rgb[1];
-  voxColor[ci + 2] = rgb[2];
+  voxColor[ci]     = rgb[0] | 0;
+  voxColor[ci + 1] = rgb[1] | 0;
+  voxColor[ci + 2] = rgb[2] | 0;
 }
