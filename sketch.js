@@ -1,6 +1,12 @@
 // sketch.js — p5 setup/draw glue, camera, UI, input.
 // Sits at the top of the dependency tree; everything else is loaded into
 // global scope by index.html's <script> tags before this file runs.
+//
+// Visual model: ephemeral bursts (see visual/bursts.js). Per frame we run
+// the audio profiler + entity detectors, then check threshold-cross + per-
+// source refractory per band/entity. Each cross spawns a fresh Burst at a
+// jittered position around the source's "home region" in the cube. Bursts
+// walk their own dendrite tree, propagate an AP, fade, and self-cull.
 
 // ─── Camera state (lifted from volumetric-led) ──────────────────────
 let camRotX = -0.35;
@@ -10,25 +16,50 @@ let isDragging = false;
 let lastMouse = { x: 0, y: 0 };
 const ROTATE_SPEED = 0.0025;
 let paused = false;
-let showBandRing = true;
+let mutebands = false;     // B-key toggles to silence band bursts (entity-only)
 
 // ─── HUD elements ───────────────────────────────────────────────────
 let hudEl, entitiesEl, startEl;
-let hudVisible = false;        // hidden until audio starts, then revealed
-let bandNeuronIdx = [];        // first 14 NEURONS entries (band ring)
-let entityNeuronIdx = [];      // remaining entries (entity neurons)
+let hudVisible = false;
+
+// ─── Per-source spawn state ─────────────────────────────────────────
+// Edge-cross + refractory per band. Bursts spawn when a band's
+// relativeEnergy crosses the SPAWN_LEVEL and the band's refractory has
+// expired. While energy stays above SPAWN_LEVEL, re-spawn every
+// SUSTAIN_INTERVAL frames so sustained loud bands keep firing.
+const BAND_SPAWN_LEVEL = 1.2;        // (relativeEnergy units; 1.0 = at threshold)
+const BAND_REFRACTORY = 8;           // frames between bursts per band
+const BAND_SUSTAIN_INTERVAL = 14;    // re-spawn cadence on held energy
+const bandLastSpawn = new Array(14).fill(-999);
+const bandWasAbove = new Array(14).fill(false);
+
+const ENTITY_SPAWN_LEVEL = 0.32;     // 0..1 in entityFireLevels space
+const ENTITY_REFRACTORY = {          // frames between bursts per entity
+  kick: 7, snare: 6, hat: 4, voice: 10, brass: 12, synth: 18, pad: 30
+};
+const entityLastSpawn = {
+  kick: -999, snare: -999, hat: -999, voice: -999, brass: -999, synth: -999, pad: -999
+};
+let frameTickV7 = 0;                 // local frame counter independent of p5's
+
+// Entity spawn home positions (relative to cube center). Each spawn jitters
+// ±BURST_JITTER voxels so each kick burst (etc.) lands in a different exact
+// spot — visual variety without losing the "kick lives down here" identity.
+const entityHomes = {
+  kick:  { x:  0, y:  3, z:  0 },
+  snare: { x:  3, y:  1, z:  0 },
+  hat:   { x:  0, y: -3, z:  3 },
+  voice: { x:  0, y:  0, z: -3 },
+  brass: { x: -3, y:  0, z:  2 },
+  synth: { x:  2, y: -1, z: -2 },
+  pad:   { x: -2, y: -2, z: -1 }
+};
+const BURST_JITTER = 2;
 
 function setup() {
   createCanvas(windowWidth, windowHeight, WEBGL);
   pixelDensity(Math.min(displayDensity(), 2));
-
   initVoxels();
-  rebuildNeurons(0xC0FFEE);
-  // After buildNeurons, slot indices so sketch can address band vs entity bursts.
-  for (let i = 0; i < NEURONS.length; i++) {
-    if (NEURONS[i].kind === "band") bandNeuronIdx.push(i);
-    else entityNeuronIdx.push(i);
-  }
 
   hudEl = document.getElementById("hud");
   entitiesEl = document.getElementById("entities");
@@ -44,12 +75,14 @@ function draw() {
   background(RENDER_BG[0], RENDER_BG[1], RENDER_BG[2]);
 
   if (!paused) {
+    frameTickV7++;
     profileFrame();
     if (typeof window.__v7Pitch !== "undefined") window.__v7Pitch.tick();
     const fires = detectEntities();
-    routeFires(fires);
+    spawnFromBands();
+    spawnFromEntities(fires);
     decayVoxels();
-    for (const n of NEURONS) n.step();
+    stepBursts();
   }
 
   // ─── Camera ─────────────────────────────────────────────────────
@@ -62,33 +95,112 @@ function draw() {
   const camZ = camDist * Math.cos(camRotY) * cosX;
   camera(camX, camY, camZ, 0, 0, 0, 0, 1, 0);
 
-  // ─── Render voxels ──────────────────────────────────────────────
-  renderVoxels(window, !showBandRing);
-
-  // ─── 2D HUD entity bars ─────────────────────────────────────────
+  renderVoxels(window, false);
   _renderEntityBars();
 }
 
-// Route per-frame entity firing levels into the matching neurons. Also drives
-// the band ring from the per-band relativeEnergy so it pulses with the
-// spectrum (continuity with v6's frequency-legend feel).
-function routeFires(fires) {
-  for (let i = 0; i < bandNeuronIdx.length; i++) {
-    const n = NEURONS[bandNeuronIdx[i]];
+// ─── Band burst spawning ────────────────────────────────────────────
+// For each band, fire a burst on threshold-cross (rising edge) and re-fire
+// periodically while sustained. Burst color = band's v6 hue; secondary =
+// the neighboring band's hue (color diffusion follows v6's color wheel).
+function spawnFromBands() {
+  if (mutebands) return;
+  for (let i = 0; i < frequencyRanges.length; i++) {
     const r = frequencyRanges[i];
-    if (!r) continue;
-    // v6's relativeEnergy = 4 * energy / threshold (so it's 4 at threshold).
-    // Scale ×0.18 so a band fires fully only well above threshold (~1.4×) and
-    // sits in the 0.3–0.7 range during typical music. Avoids the "everything
-    // is always lit" failure mode caught during red-team.
-    const level = Math.min(1, (r.relativeEnergy || 0) * 0.18);
-    n.fire(level);
+    const re = r.relativeEnergy || 0;
+    const above = re > BAND_SPAWN_LEVEL;
+    const sinceLast = frameTickV7 - bandLastSpawn[i];
+    const isRisingEdge = above && !bandWasAbove[i] && sinceLast > BAND_REFRACTORY;
+    const isSustainTick = above && bandWasAbove[i] && sinceLast > BAND_SUSTAIN_INTERVAL;
+    if (isRisingEdge || isSustainTick) {
+      const intensity = Math.min(1, re / 3.5);   // re ~3.5 → full intensity
+      _spawnBandBurst(i, intensity);
+      bandLastSpawn[i] = frameTickV7;
+    }
+    bandWasAbove[i] = above;
   }
-  for (const idx of entityNeuronIdx) {
-    const n = NEURONS[idx];
-    const lv = fires[n.name];
-    if (lv != null) n.fire(lv);
+}
+
+function _spawnBandBurst(bandIdx, intensity) {
+  const r = frequencyRanges[bandIdx];
+  const neighbor = frequencyRanges[(bandIdx + 1) % frequencyRanges.length];
+  const cx = (VOXEL_GRID - 1) / 2;
+  const cy = (VOXEL_GRID - 1) / 2;
+  const cz = (VOXEL_GRID - 1) / 2;
+  // Soma position: on a ring at angle = bandIdx / 14 * 2π. Radius randomized
+  // ±20% so each band-burst lands somewhere new on its arc.
+  const angle = (bandIdx / frequencyRanges.length) * Math.PI * 2
+              + (Math.random() - 0.5) * 0.35;
+  const baseR = (VOXEL_GRID / 2 - 2);
+  const radius = baseR * (0.55 + Math.random() * 0.4);
+  // Vertical stratification by group (bass low, mid mid, high high) +
+  // small jitter per spawn.
+  const yBase = r.group === "bass" ? cy + 3 : r.group === "high" ? cy - 3 : cy;
+  const sx = _clamp(Math.round(cx + Math.cos(angle) * radius));
+  const sy = _clamp(Math.round(yBase + (Math.random() - 0.5) * 4));
+  const sz = _clamp(Math.round(cz + Math.sin(angle) * radius));
+  spawnBurst(
+    { x: sx, y: sy, z: sz },
+    r.rgb,
+    neighbor.rgb,
+    {
+      kind: "band",
+      label: r.name,
+      intensity,
+      lifespan: r.group === "bass" ? 110 : r.group === "high" ? 55 : 80,
+      apFrames: r.group === "bass" ? 26 : r.group === "high" ? 14 : 18,
+      treeLen: r.group === "bass" ? 110 : r.group === "high" ? 60 : 85
+    }
+  );
+}
+
+// ─── Entity burst spawning ──────────────────────────────────────────
+function spawnFromEntities(fires) {
+  for (const name in entityHomes) {
+    const lv = fires[name] || 0;
+    if (lv < ENTITY_SPAWN_LEVEL) continue;
+    if (frameTickV7 - entityLastSpawn[name] < ENTITY_REFRACTORY[name]) continue;
+    _spawnEntityBurst(name, lv);
+    entityLastSpawn[name] = frameTickV7;
   }
+}
+
+function _spawnEntityBurst(name, intensity) {
+  const h = entityHomes[name];
+  const cx = (VOXEL_GRID - 1) / 2;
+  const cy = (VOXEL_GRID - 1) / 2;
+  const cz = (VOXEL_GRID - 1) / 2;
+  const sx = _clamp(Math.round(cx + h.x + (Math.random() - 0.5) * BURST_JITTER));
+  const sy = _clamp(Math.round(cy + h.y + (Math.random() - 0.5) * BURST_JITTER));
+  const sz = _clamp(Math.round(cz + h.z + (Math.random() - 0.5) * BURST_JITTER));
+  const soma = entityPalette[name];
+  // Pick a v6 palette color as the secondary — random per spawn so each
+  // burst's diffusion picks a different neighbor hue. Gives each kick (etc.)
+  // a unique color signature without losing its primary identity.
+  const sec = frequencyRanges[Math.floor(Math.random() * frequencyRanges.length)].rgb;
+  // Per-entity tuning: kick is slow + chunky, hat is fast + thin, etc.
+  const profiles = {
+    kick:  { lifespan: 95, apFrames: 22, treeLen: 95 },
+    snare: { lifespan: 65, apFrames: 16, treeLen: 75 },
+    hat:   { lifespan: 38, apFrames: 10, treeLen: 50 },
+    voice: { lifespan: 80, apFrames: 24, treeLen: 90 },
+    brass: { lifespan: 90, apFrames: 28, treeLen: 100 },
+    synth: { lifespan: 110, apFrames: 32, treeLen: 110 },
+    pad:   { lifespan: 140, apFrames: 40, treeLen: 110 }
+  };
+  const prof = profiles[name];
+  spawnBurst(soma, soma, sec, {
+    kind: "entity",
+    label: name,
+    intensity,
+    lifespan: prof.lifespan,
+    apFrames: prof.apFrames,
+    treeLen: prof.treeLen
+  });
+}
+
+function _clamp(v) {
+  return Math.max(1, Math.min(VOXEL_GRID - 2, v));
 }
 
 function _renderEntityBars() {
@@ -101,6 +213,7 @@ function _renderEntityBars() {
     const dim = "·".repeat(12 - bars);
     return `<div><span class="name">${n.toUpperCase()}</span> <span class="lit">${lit}</span><span class="bar">${dim}</span></div>`;
   });
+  lines.push(`<div style="margin-top:6px;color:#444;">bursts ${BURSTS.length}/${BURST_CAP}</div>`);
   entitiesEl.innerHTML = lines.join("");
 }
 
@@ -123,9 +236,7 @@ function _onStartTap(e) {
 }
 
 // ─── Camera input ───────────────────────────────────────────────────
-function mousePressed(e) {
-  // Only the canvas drives camera. If the click started on the splash, the
-  // splash handler runs and we bail.
+function mousePressed() {
   if (!audioReady) return false;
   isDragging = true;
   lastMouse.x = mouseX;
@@ -145,10 +256,7 @@ function mouseDragged() {
   return false;
 }
 
-function mouseReleased() {
-  isDragging = false;
-  return false;
-}
+function mouseReleased() { isDragging = false; return false; }
 
 function mouseWheel(event) {
   if (!audioReady) return;
@@ -157,7 +265,7 @@ function mouseWheel(event) {
   return false;
 }
 
-function touchStarted(e) {
+function touchStarted() {
   if (!audioReady) return false;
   if (touches && touches.length) {
     isDragging = true;
@@ -179,10 +287,7 @@ function touchMoved() {
   return false;
 }
 
-function touchEnded() {
-  isDragging = false;
-  return false;
-}
+function touchEnded() { isDragging = false; return false; }
 
 function keyPressed() {
   if (key === 'h' || key === 'H') {
@@ -191,20 +296,11 @@ function keyPressed() {
     entitiesEl.classList.toggle("hidden", !hudVisible);
   } else if (key === 'f' || key === 'F') {
     _toggleFullscreen();
-  } else if (key === 'r' || key === 'R') {
-    rebuildNeurons();
-    bandNeuronIdx.length = 0;
-    entityNeuronIdx.length = 0;
-    for (let i = 0; i < NEURONS.length; i++) {
-      if (NEURONS[i].kind === "band") bandNeuronIdx.push(i);
-      else entityNeuronIdx.push(i);
-    }
-    console.log("[v7] dendrites rebuilt");
   } else if (key === 'b' || key === 'B') {
-    showBandRing = !showBandRing;
+    mutebands = !mutebands;
+    console.log("[v7] band bursts:", mutebands ? "muted" : "on");
   } else if (key === 'n' || key === 'N') {
-    const cur = noiseFilterMode;
-    const next = cur === "off" ? "native" : "off";
+    const next = noiseFilterMode === "off" ? "native" : "off";
     setNoiseFilter(next).then(() => console.log("[v7] noise filter:", next));
   } else if (key === ' ') {
     paused = !paused;

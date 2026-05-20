@@ -8,7 +8,7 @@ Merges the **vibe of `audio-viz6`** (14-band frequency-wheel hue palette, beat p
 
 1. **Noise filtering** — optional RNNoise WASM in an AudioWorklet, with native `noiseSuppression` as fallback. Press `N` to toggle.
 2. **Low-latency audio profiling** — Web Audio `AnalyserNode` (FFT 2048) per-frame + Meyda for spectral flux / RMS / sharpness / ZCR + pitchy for monophonic f0 + Silero VAD for voice detection. All ML deps load lazily and degrade gracefully if a CDN fails.
-3. **Per-source visual bursts** — 14 dim "band neurons" arranged on a torus ring (continuity with v6's color wheel) + 7 bright "entity neurons" (Kick · Snare · Hat · Voice · Brass · Synth · Pad) at fixed positions. Each fires based on its own detector and bursts an action-potential along its pre-walked dendrite tree.
+3. **Per-source visual bursts** — every audio "signal" (band or entity) that crosses its threshold spawns a fresh ephemeral burst: a dendrite tree walked from a soma at a position consistent with the source's identity, with an action potential propagating outward, then fading. Bands spawn from positions on an angular ring (v6 color-wheel layout, vertically stratified by group); entities (Kick · Snare · Hat · Voice · Brass · Synth · Pad) spawn from named home regions with per-spawn jitter so no two bursts of the same kind are identical. Each burst's color diffuses from its soma color outward toward a v6-palette secondary along the dendrite tree — the "center is one color, branches radiate to neighboring hues" feel from v6 translated into 3D.
 
 ## Honest framing on "destem"
 
@@ -30,8 +30,7 @@ Tap / click the splash to grant mic permission.
 - **scroll** zoom
 - **H** toggle HUD
 - **F** fullscreen
-- **R** rebuild dendrite trees with a new random seed
-- **B** toggle band-ring visibility (entity-only mode)
+- **B** mute band bursts (entity-only mode)
 - **N** toggle noise filter
 - **space** pause
 
@@ -48,7 +47,7 @@ audio/
 visual/
   palette.js            14-band hue wheel (ported verbatim from audio-viz6)
   voxels.js             Float32Array grid + decay step (ported from volumetric-led mode 5)
-  neurons.js            Neuron class + pre-walked dendrite trees
+  bursts.js             Burst class + per-burst dendrite walks + center→edge color lerp
   render.js             WEBGL voxel point-cloud draw + bloom halo
 ```
 
