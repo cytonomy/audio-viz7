@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>audio-viz7 — neural bursts</title>
+
+  <!-- p5.js (matches audio-viz6 / volumetric-led) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/addons/p5.sound.min.js"></script>
+
+  <!-- ESM module map. All ML/WASM deps load lazily and degrade gracefully. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "meyda":       "https://esm.sh/meyda@5.6.3",
+      "pitchy":      "https://esm.sh/pitchy@4.1.0",
+      "@ricky0123/vad-web": "https://esm.sh/@ricky0123/vad-web@0.0.24"
+    }
+  }
+  </script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { background: #000; overflow: hidden; width: 100%; height: 100%; font-family: 'Courier New', monospace; }
+    body { touch-action: none; -webkit-user-select: none; user-select: none; }
+
+    #hud {
+      position: fixed; top: 12px; left: 12px;
+      color: #888; font-size: 11px; line-height: 1.5; z-index: 10;
+      pointer-events: none; transition: opacity 0.25s;
+    }
+    #hud .k { color: #0af; }
+    #hud .title { color: #ccc; font-size: 13px; margin-bottom: 4px; }
+    #hud.hidden { opacity: 0; }
+
+    #entities {
+      position: fixed; top: 12px; right: 12px;
+      color: #888; font-size: 11px; line-height: 1.6; z-index: 10;
+      pointer-events: none; text-align: right;
+      transition: opacity 0.25s;
+    }
+    #entities .name { display: inline-block; min-width: 70px; text-align: left; }
+    #entities .bar { display: inline-block; color: #444; }
+    #entities .lit { color: #fff; }
+    #entities.hidden { opacity: 0; }
+
+    #start {
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      color: #aaa; font-size: 14px; z-index: 100; cursor: pointer;
+      background: radial-gradient(circle at center, #0a0f18 0%, #000 60%);
+    }
+    #start h1 { color: #0af; font-size: 22px; margin-bottom: 12px; font-weight: 400; letter-spacing: 0.1em; }
+    #start p { color: #666; font-size: 12px; margin-top: 6px; }
+    #start.hidden { display: none; }
+
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+
+<div id="start">
+  <h1>AUDIO-VIZ7 · NEURAL BURSTS</h1>
+  <p>tap / click anywhere to enable microphone</p>
+  <p style="margin-top: 18px; color: #444; font-size: 10px;">drag to orbit · scroll to zoom · H toggles HUD · F fullscreen</p>
+</div>
+
+<div id="hud" class="hidden">
+  <div class="title">audio-viz7</div>
+  <div><span class="k">drag</span> orbit · <span class="k">scroll</span> zoom</div>
+  <div><span class="k">H</span> hud · <span class="k">F</span> fullscreen · <span class="k">R</span> rebuild dendrites</div>
+  <div><span class="k">B</span> band-ring · <span class="k">N</span> noise filter · <span class="k">space</span> pause</div>
+  <div id="hud-status" style="margin-top: 8px; color: #555;"></div>
+</div>
+
+<div id="entities" class="hidden"></div>
+
+<script src="visual/palette.js"></script>
+<script src="visual/voxels.js"></script>
+<script src="visual/neurons.js"></script>
+<script src="visual/render.js"></script>
+<script src="audio/profiler.js"></script>
+<script src="audio/entities.js"></script>
+<script type="module" src="audio/loaders.js"></script>
+<script src="sketch.js"></script>
+
+</body>
+</html>
