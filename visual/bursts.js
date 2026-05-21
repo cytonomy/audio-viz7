@@ -22,29 +22,31 @@ function burstRand() {
   return burstRng / 0x100000000;
 }
 
-// The 6 unit-vector directions in voxel space.
-const _DIRS = [
-  { dx:  1, dy: 0, dz: 0 },
-  { dx: -1, dy: 0, dz: 0 },
-  { dx: 0, dy:  1, dz: 0 },
-  { dx: 0, dy: -1, dz: 0 },
-  { dx: 0, dy: 0, dz:  1 },
-  { dx: 0, dy: 0, dz: -1 }
-];
+// Random unit vector on the sphere (Marsaglia rejection method).
+function _randUnitVec() {
+  let vx, vy, vz, len2;
+  do {
+    vx = burstRand() * 2 - 1;
+    vy = burstRand() * 2 - 1;
+    vz = burstRand() * 2 - 1;
+    len2 = vx*vx + vy*vy + vz*vz;
+  } while (len2 < 0.0001 || len2 > 1);
+  const inv = 1 / Math.sqrt(len2);
+  return { vx: vx * inv, vy: vy * inv, vz: vz * inv };
+}
 
-// Two directions are perpendicular when their dot product is zero. Pre-
-// compute the perpendicular set per direction so split + turn picks are O(1).
-const _PERP = _DIRS.map(d =>
-  _DIRS.filter(o => o.dx*d.dx + o.dy*d.dy + o.dz*d.dz === 0)
-);
-
-// Grow a tree of thin curving tendrils from the soma. N primary branches
-// shoot off in random initial directions. Each branch advances one voxel
-// per step in its current direction (momentum), with a small chance per
-// step of turning 90° (curve) or splitting (fork). Branches die when they
-// hit the cube boundary, run out of life, or get boxed in by visited
-// neighbors. Result: distinct, visually-traceable dendrite arms — not
-// the bushy BFS sphere it replaces.
+// Grow organic dendrite tendrils using continuous float coordinates + per-
+// sub-step velocity perturbation. This is how volumetric-led mode 5 produces
+// its smooth curving paths: tips have float position (x,y,z) and unit-vector
+// velocity (vx,vy,vz), advance by small sub-steps, and light up whichever
+// voxel they happen to be inside.  Pure rasterization in a cubic lattice.
+//
+// Compared to the prior axis-aligned walker:
+//   - directions are arbitrary 3D unit vectors, not 6 axis-aligned options
+//   - tips wander smoothly because each sub-step perturbs velocity by a
+//     small random amount and then renormalizes — the path curves
+//   - depth = unique voxels traversed (a voxel may take several sub-steps
+//     to "exit", giving each tip slightly different progression rates)
 function _growExplosion(sx, sy, sz, targetNodes) {
   const nodes = [];
   const depths = [];
@@ -56,115 +58,116 @@ function _growExplosion(sx, sy, sz, targetNodes) {
   depths.push(0);
   let maxDepth = 0;
 
-  // Per-burst tuning knobs. Tuned for clearly-visible thin tendrils — NOT
-  // bushy explosions. Split probability is intentionally low so branch
-  // count stays bounded; high split rates compound exponentially and turn
-  // the burst back into a dense ball.
-  //   PRIMARY_COUNT: how many arms shoot off from soma
-  //   TURN_PROB:     chance per step a branch turns 90°
-  //   SPLIT_PROB:    chance per step a branch forks (kept rare)
-  //   BRANCH_LIFE:   max steps a single branch lives
-  //   MAX_BRANCHES:  hard cap on simultaneous live branches
-  //   MAX_PER_SHELL: rejects new steps when a depth shell is already full
-  //                  → forces branches to spread laterally instead of
-  //                  piling onto the same depth
+  // Per-burst tuning knobs:
+  //   PRIMARY_COUNT  — primary tendril arms from soma
+  //   TIP_SPEED      — voxels traveled per sub-step (small for smooth curves)
+  //   SUB_STEPS      — sub-steps per outer pass (per "frame" of growth)
+  //   PERTURB        — velocity jitter magnitude per sub-step (≈ curvature)
+  //   SPLIT_PROB     — chance per outer pass a tip forks
+  //   BRANCH_LIFE    — max sub-steps a tip can take before dying
+  //   MAX_BRANCHES   — hard cap on simultaneous live tips
+  //   MAX_PER_SHELL  — per-depth occupancy cap → keeps tendrils thin
   const PRIMARY_COUNT = 4 + Math.floor(burstRand() * 2);     // 4-5 arms
-  const TURN_PROB = 0.18;
-  const SPLIT_PROB = 0.022;
-  const BRANCH_LIFE = Math.max(20, Math.round(VOXEL_GRID * 1.2));
+  const TIP_SPEED = 0.42;
+  const SUB_STEPS = 3;
+  const PERTURB = 0.32;
+  const SPLIT_PROB = 0.04;
+  const BRANCH_LIFE = Math.max(60, Math.round(VOXEL_GRID * 3));
   const MAX_BRANCHES = 7;
   const MAX_PER_SHELL = 8;
 
-  // Active branch heads. Each branch advances one voxel per outer loop pass.
-  const branches = [];
-  // Pick PRIMARY_COUNT distinct initial directions so arms don't overlap.
-  const dirOrder = _DIRS.slice();
-  for (let i = dirOrder.length - 1; i > 0; i--) {
-    const j = Math.floor(burstRand() * (i + 1));
-    const t = dirOrder[i]; dirOrder[i] = dirOrder[j]; dirOrder[j] = t;
-  }
+  // Active tips with continuous coords. Position starts at soma center
+  // (+0.5 so floor(x) snaps to soma voxel).
+  const tips = [];
   for (let i = 0; i < PRIMARY_COUNT; i++) {
-    branches.push({
-      x: sx, y: sy, z: sz,
-      dir: dirOrder[i % 6],
+    const dir = _randUnitVec();
+    tips.push({
+      x: sx + 0.5, y: sy + 0.5, z: sz + 0.5,
+      vx: dir.vx, vy: dir.vy, vz: dir.vz,
       depth: 0,
       life: BRANCH_LIFE
     });
   }
-
-  // Per-depth-shell occupancy counter — used to reject new steps into a
-  // shell that's already at MAX_PER_SHELL. Keeps tendrils thin.
   const shellCount = new Map();
-  shellCount.set(0, 1);     // soma occupies depth 0
+  shellCount.set(0, 1);
 
-  // Iterate until we have enough nodes or all branches died.
-  let safety = targetNodes * 4;     // hard guard against runaway loops
-  while (nodes.length < targetNodes && branches.length > 0 && safety-- > 0) {
-    for (let bi = branches.length - 1; bi >= 0; bi--) {
+  let safety = targetNodes * 8;
+  while (nodes.length < targetNodes && tips.length > 0 && safety-- > 0) {
+    for (let ti = tips.length - 1; ti >= 0; ti--) {
       if (nodes.length >= targetNodes) break;
-      const b = branches[bi];
-      if (b.life <= 0) { branches.splice(bi, 1); continue; }
+      const tip = tips[ti];
+      if (tip.life <= 0) { tips.splice(ti, 1); continue; }
 
-      // Pick this step's direction. With TURN_PROB chance, swap to a
-      // perpendicular axis (90° turn). Otherwise continue straight.
-      let stepDir = b.dir;
-      if (burstRand() < TURN_PROB) {
-        const perps = _PERP[_DIRS.indexOf(b.dir)];
-        stepDir = perps[Math.floor(burstRand() * perps.length)];
-      }
+      let tipDied = false;
+      for (let s = 0; s < SUB_STEPS; s++) {
+        // Perturb velocity slightly, then renormalize back to a unit vector
+        // — this is what produces smooth organic curves instead of straight
+        // pipes or 90° turns.
+        tip.vx += (burstRand() * 2 - 1) * PERTURB;
+        tip.vy += (burstRand() * 2 - 1) * PERTURB;
+        tip.vz += (burstRand() * 2 - 1) * PERTURB;
+        const len = Math.sqrt(tip.vx*tip.vx + tip.vy*tip.vy + tip.vz*tip.vz);
+        if (len < 0.0001) { tipDied = true; break; }
+        const inv = 1 / len;
+        tip.vx *= inv; tip.vy *= inv; tip.vz *= inv;
 
-      // Try the step. If blocked (out-of-bounds or visited), try one
-      // alternative direction once, else this branch dies.
-      let nx = b.x + stepDir.dx;
-      let ny = b.y + stepDir.dy;
-      let nz = b.z + stepDir.dz;
-      let nvi = voxInBounds(nx, ny, nz) ? voxIdx(nx, ny, nz) : -1;
-      if (nvi === -1 || visited.has(nvi)) {
-        // Try a different direction
-        let recovered = false;
-        for (let k = 0; k < 6; k++) {
-          const alt = _DIRS[(Math.floor(burstRand() * 6))];
-          if (alt === stepDir) continue;
-          const ax = b.x + alt.dx, ay = b.y + alt.dy, az = b.z + alt.dz;
-          if (!voxInBounds(ax, ay, az)) continue;
-          const avi = voxIdx(ax, ay, az);
-          if (visited.has(avi)) continue;
-          stepDir = alt; nx = ax; ny = ay; nz = az; nvi = avi;
-          recovered = true;
-          break;
+        // Advance position by TIP_SPEED along velocity
+        tip.x += tip.vx * TIP_SPEED;
+        tip.y += tip.vy * TIP_SPEED;
+        tip.z += tip.vz * TIP_SPEED;
+        tip.life--;
+
+        const ix = Math.floor(tip.x);
+        const iy = Math.floor(tip.y);
+        const iz = Math.floor(tip.z);
+        if (!voxInBounds(ix, iy, iz)) { tipDied = true; break; }
+        const vi = voxIdx(ix, iy, iz);
+        if (!visited.has(vi)) {
+          const newDepth = tip.depth + 1;
+          const occ = shellCount.get(newDepth) || 0;
+          if (occ >= MAX_PER_SHELL) { tipDied = true; break; }
+          visited.add(vi);
+          nodes.push(vi);
+          depths.push(newDepth);
+          shellCount.set(newDepth, occ + 1);
+          tip.depth = newDepth;
+          if (newDepth > maxDepth) maxDepth = newDepth;
         }
-        if (!recovered) { branches.splice(bi, 1); continue; }
       }
+      if (tipDied) { tips.splice(ti, 1); continue; }
 
-      // Per-shell cap — if this depth is already full, kill the branch.
-      // Forces thin tendrils instead of bushy shells.
-      const newDepth = b.depth + 1;
-      const occ = shellCount.get(newDepth) || 0;
-      if (occ >= MAX_PER_SHELL) { branches.splice(bi, 1); continue; }
-
-      // Advance
-      b.x = nx; b.y = ny; b.z = nz;
-      b.dir = stepDir;
-      b.depth = newDepth;
-      b.life--;
-      visited.add(nvi);
-      nodes.push(nvi);
-      depths.push(newDepth);
-      shellCount.set(newDepth, occ + 1);
-      if (newDepth > maxDepth) maxDepth = newDepth;
-
-      // Possible split — spawn a sub-branch in a perpendicular direction.
-      // Only past depth 4 (splits at the soma turn into bushy core) and
-      // bounded by MAX_BRANCHES so total live arms stays manageable.
-      if (newDepth > 4 && burstRand() < SPLIT_PROB && branches.length < MAX_BRANCHES) {
-        const perps = _PERP[_DIRS.indexOf(stepDir)];
-        const splitDir = perps[Math.floor(burstRand() * perps.length)];
-        branches.push({
-          x: nx, y: ny, z: nz,
-          dir: splitDir,
-          depth: newDepth,
-          life: Math.max(8, (b.life * 0.65) | 0)
-        });
+      // Occasional split — spawn a child tip with velocity perpendicular to
+      // the parent. Cross-product gives a clean orthogonal direction (with
+      // a small jitter added so two splits from the same axis don't overlap).
+      if (tip.depth > 5 && burstRand() < SPLIT_PROB && tips.length < MAX_BRANCHES) {
+        // Pick an arbitrary axis that's not parallel to tip velocity,
+        // then cross-product to get perpendicular.
+        let ax = 0, ay = 0, az = 0;
+        if (Math.abs(tip.vx) < 0.9) ax = 1;
+        else if (Math.abs(tip.vy) < 0.9) ay = 1;
+        else az = 1;
+        let cx = tip.vy * az - tip.vz * ay;
+        let cy = tip.vz * ax - tip.vx * az;
+        let cz = tip.vx * ay - tip.vy * ax;
+        const clen = Math.sqrt(cx*cx + cy*cy + cz*cz);
+        if (clen > 0.001) {
+          const inv = 1 / clen;
+          cx *= inv; cy *= inv; cz *= inv;
+          // Mix in a bit of forward velocity so the split fans out at ~60°
+          // not 90° — looks more like a natural dendrite branch.
+          const forward = 0.45;
+          let mx = cx * (1 - forward) + tip.vx * forward;
+          let my = cy * (1 - forward) + tip.vy * forward;
+          let mz = cz * (1 - forward) + tip.vz * forward;
+          const mlen = Math.sqrt(mx*mx + my*my + mz*mz);
+          mx /= mlen; my /= mlen; mz /= mlen;
+          tips.push({
+            x: tip.x, y: tip.y, z: tip.z,
+            vx: mx, vy: my, vz: mz,
+            depth: tip.depth,
+            life: Math.max(20, (tip.life * 0.65) | 0)
+          });
+        }
       }
     }
   }
