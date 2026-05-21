@@ -21,9 +21,12 @@ const RENDER_HOT_THRESH   = 0.55;       // hot-white peak only for AP heads
 const MAX_RENDER_VOXELS   = 1800;       // hard cap on draw budget per frame
 
 // Reusable scratch buffer — avoid GC pressure by holding a flat lit-list
-// across frames. Each entry is 5 contiguous numbers: [voxIdx, brightness,
-// r, g, b]. Indexing this way is much faster than {} per voxel.
-const _litBuf = new Float32Array(MAX_RENDER_VOXELS * 5);
+// across frames. Each entry is 6 contiguous numbers:
+//   [voxIdx, total-brightness, signal-brightness, r, g, b]
+// Tracking signal separately lets the render pass distinguish persistent
+// dendrite trail (structure-only) from AP wavefront (signal-heavy), so
+// branches read as clean dot-lines while growing tips burst with glow.
+const _litBuf = new Float32Array(MAX_RENDER_VOXELS * 6);
 let _litCount = 0;
 // Adaptive brightness threshold. Starts at RENDER_CORE_THRESH and creeps
 // upward whenever a frame fills the lit-buffer to capacity (so the dimmest
@@ -62,13 +65,14 @@ function renderVoxels(p, _hideBandUnused) {
     if (b < thresh) continue;
 
     if (count < cap) {
-      const w = count * 5;
+      const w = count * 6;
       const ci = i * 3;
       buf[w]     = i;
       buf[w + 1] = b;
-      buf[w + 2] = voxColor[ci];
-      buf[w + 3] = voxColor[ci + 1];
-      buf[w + 4] = voxColor[ci + 2];
+      buf[w + 2] = signal;
+      buf[w + 3] = voxColor[ci];
+      buf[w + 4] = voxColor[ci + 1];
+      buf[w + 5] = voxColor[ci + 2];
       count++;
     }
     // else: skip and let _dynThresh climb next frame so the dimmest go first
@@ -86,15 +90,23 @@ function renderVoxels(p, _hideBandUnused) {
   _litCount = count;
 
   // ─── Stage 2: render ────────────────────────────────────────────
+  // Two visual classes of lit voxel:
+  //   - structure-dominant (signal small): persistent dendrite trail —
+  //     render as a CRISP small dot with only a tight halo, so branches
+  //     read as clean traceable lines, not fog.
+  //   - signal-dominant (signal large): the AP wavefront's growing tip —
+  //     render with full atmospheric glow + bloom + hot-white peak, so the
+  //     growing tip of each branch bursts dramatically.
   p.noFill();
 
   for (let i = 0; i < count; i++) {
-    const w = i * 5;
+    const w = i * 6;
     const vi = buf[w] | 0;
     const b = buf[w + 1];
-    const r = buf[w + 2];
-    const g = buf[w + 3];
-    const bl = buf[w + 4];
+    const sig = buf[w + 2];
+    const r = buf[w + 3];
+    const g = buf[w + 4];
+    const bl = buf[w + 5];
 
     // (x,y,z) from flat index, layout z*G² + y*G + x
     const z = (vi / (G * G)) | 0;
@@ -105,35 +117,38 @@ function renderVoxels(p, _hideBandUnused) {
     const py = (y - half + 0.5) * S;
     const pz = (z - half + 0.5) * S;
 
-    // Pass A — outer atmospheric glow. Always fires for lit voxels. Wide,
-    // very low alpha. Multiple overlapping atmospheric glows additively
-    // accumulate into a soft volumetric haze around dense burst regions.
-    p.strokeWeight(b * 24 + 9);
-    p.stroke(r, g, bl, b * 16);
-    p.point(px, py, pz);
+    // Atmospheric glow — gated on signal strength. Only AP-wavefront
+    // voxels emit the wide halo. Persistent dendrite voxels stay sharp.
+    if (sig > 0.12) {
+      p.strokeWeight(sig * 26 + 8);
+      p.stroke(r, g, bl, sig * 22);
+      p.point(px, py, pz);
+    }
 
-    // Pass B — inner bloom halo. Medium width, moderate alpha.
-    if (b >= RENDER_BLOOM_THRESH) {
-      p.strokeWeight(b * 13 + 4);
+    // Inner bloom halo — for any voxel above a moderate brightness.
+    // Tighter than before so the structure trail isn't fogged out.
+    if (b >= RENDER_BLOOM_THRESH || sig > 0.08) {
+      p.strokeWeight(b * 9 + 3);
       p.stroke(r, g, bl, b * 38);
       p.point(px, py, pz);
     }
 
-    // Pass C — core bright dot.
-    const coreSize = 2 + b * 4;
+    // Core bright dot — every lit voxel. Smaller base size so the dendrite
+    // structure reads as a chain of distinct dots, not a wash.
+    const coreSize = 1.5 + b * 4;
     p.strokeWeight(coreSize);
-    p.stroke(r, g, bl, 60 + b * 195);
+    p.stroke(r, g, bl, 80 + b * 175);
     p.point(px, py, pz);
 
-    // Pass D — hot white peak (AP heads).
-    if (b > RENDER_HOT_THRESH) {
-      const wb = (b - RENDER_HOT_THRESH) / (1 - RENDER_HOT_THRESH);
+    // Hot white peak — AP-wavefront ONLY, brightest tips.
+    if (sig > RENDER_HOT_THRESH) {
+      const wb = (sig - RENDER_HOT_THRESH) / (1 - RENDER_HOT_THRESH);
       p.strokeWeight(coreSize * 0.45);
       p.stroke(
-        r + (255 - r) * wb * 0.75,
-        g + (255 - g) * wb * 0.75,
-        bl + (255 - bl) * wb * 0.75,
-        b * 180
+        r + (255 - r) * wb * 0.85,
+        g + (255 - g) * wb * 0.85,
+        bl + (255 - bl) * wb * 0.85,
+        sig * 200
       );
       p.point(px, py, pz);
     }

@@ -22,65 +22,150 @@ function burstRand() {
   return burstRng / 0x100000000;
 }
 
-// Fisher-Yates shuffle into a small fixed array, using burstRand.
-const _NB = [null, null, null, null, null, null];
-function _shuffledNeighbors() {
-  _NB[0] = { dx:  1, dy: 0, dz: 0 };
-  _NB[1] = { dx: -1, dy: 0, dz: 0 };
-  _NB[2] = { dx: 0, dy:  1, dz: 0 };
-  _NB[3] = { dx: 0, dy: -1, dz: 0 };
-  _NB[4] = { dx: 0, dy: 0, dz:  1 };
-  _NB[5] = { dx: 0, dy: 0, dz: -1 };
-  for (let i = 5; i > 0; i--) {
-    const j = Math.floor(burstRand() * (i + 1));
-    const t = _NB[i]; _NB[i] = _NB[j]; _NB[j] = t;
-  }
-  return _NB;
-}
+// The 6 unit-vector directions in voxel space.
+const _DIRS = [
+  { dx:  1, dy: 0, dz: 0 },
+  { dx: -1, dy: 0, dz: 0 },
+  { dx: 0, dy:  1, dz: 0 },
+  { dx: 0, dy: -1, dz: 0 },
+  { dx: 0, dy: 0, dz:  1 },
+  { dx: 0, dy: 0, dz: -1 }
+];
 
-// Grow a branching tree BFS from the soma. At each node, spawn 1-3 random
-// children in unique 6-neighbor directions. Branch factor tapers with depth
-// (dense base, thin tips). Pure-random direction with NO outward bias — the
-// "explosion" comes from many tendrils spreading in all directions, not from
-// preferring an outward direction.
+// Two directions are perpendicular when their dot product is zero. Pre-
+// compute the perpendicular set per direction so split + turn picks are O(1).
+const _PERP = _DIRS.map(d =>
+  _DIRS.filter(o => o.dx*d.dx + o.dy*d.dy + o.dz*d.dz === 0)
+);
+
+// Grow a tree of thin curving tendrils from the soma. N primary branches
+// shoot off in random initial directions. Each branch advances one voxel
+// per step in its current direction (momentum), with a small chance per
+// step of turning 90° (curve) or splitting (fork). Branches die when they
+// hit the cube boundary, run out of life, or get boxed in by visited
+// neighbors. Result: distinct, visually-traceable dendrite arms — not
+// the bushy BFS sphere it replaces.
 function _growExplosion(sx, sy, sz, targetNodes) {
-  const nodes = [];           // ordered list of voxel indices (parents before children)
-  const depths = [];          // depth from soma per node
+  const nodes = [];
+  const depths = [];
   const visited = new Set();
-  // BFS queue of {x, y, z, depth}. Pre-allocated array used as a circular
-  // buffer would be ideal; for simplicity use shift() — tree sizes are small
-  // (~150 entries) so the O(N²) cost is dwarfed by the JS hash-set lookup.
-  const queue = [{ x: sx, y: sy, z: sz, depth: 0 }];
+
+  const somaVi = voxIdx(sx, sy, sz);
+  visited.add(somaVi);
+  nodes.push(somaVi);
+  depths.push(0);
   let maxDepth = 0;
 
-  while (nodes.length < targetNodes && queue.length > 0) {
-    const cur = queue.shift();
-    const vi = voxIdx(cur.x, cur.y, cur.z);
-    if (visited.has(vi)) continue;
-    visited.add(vi);
-    nodes.push(vi);
-    depths.push(cur.depth);
-    if (cur.depth > maxDepth) maxDepth = cur.depth;
+  // Per-burst tuning knobs. Tuned for clearly-visible thin tendrils — NOT
+  // bushy explosions. Split probability is intentionally low so branch
+  // count stays bounded; high split rates compound exponentially and turn
+  // the burst back into a dense ball.
+  //   PRIMARY_COUNT: how many arms shoot off from soma
+  //   TURN_PROB:     chance per step a branch turns 90°
+  //   SPLIT_PROB:    chance per step a branch forks (kept rare)
+  //   BRANCH_LIFE:   max steps a single branch lives
+  //   MAX_BRANCHES:  hard cap on simultaneous live branches
+  //   MAX_PER_SHELL: rejects new steps when a depth shell is already full
+  //                  → forces branches to spread laterally instead of
+  //                  piling onto the same depth
+  const PRIMARY_COUNT = 4 + Math.floor(burstRand() * 2);     // 4-5 arms
+  const TURN_PROB = 0.18;
+  const SPLIT_PROB = 0.022;
+  const BRANCH_LIFE = Math.max(20, Math.round(VOXEL_GRID * 1.2));
+  const MAX_BRANCHES = 7;
+  const MAX_PER_SHELL = 8;
 
-    // Branch count tapers with depth — soma gets up to 4 branches, tips get
-    // just 1. Adds a probabilistic skip so trees aren't perfectly uniform.
-    const branchFactor = cur.depth === 0
-      ? 3 + Math.floor(burstRand() * 2)        // root: 3-4 children
-      : Math.max(1, 3 - Math.floor(cur.depth * 0.18));   // tapers to 1
-    const nb = _shuffledNeighbors();
-    let added = 0;
-    for (let k = 0; k < nb.length && added < branchFactor; k++) {
-      const nx = cur.x + nb[k].dx;
-      const ny = cur.y + nb[k].dy;
-      const nz = cur.z + nb[k].dz;
-      if (!voxInBounds(nx, ny, nz)) continue;
-      const nvi = voxIdx(nx, ny, nz);
-      if (visited.has(nvi)) continue;
-      // 88% spawn probability — small gaps add variety, prevent every burst
-      // looking like a perfect sphere.
-      if (burstRand() > 0.88) continue;
-      queue.push({ x: nx, y: ny, z: nz, depth: cur.depth + 1 });
-      added++;
+  // Active branch heads. Each branch advances one voxel per outer loop pass.
+  const branches = [];
+  // Pick PRIMARY_COUNT distinct initial directions so arms don't overlap.
+  const dirOrder = _DIRS.slice();
+  for (let i = dirOrder.length - 1; i > 0; i--) {
+    const j = Math.floor(burstRand() * (i + 1));
+    const t = dirOrder[i]; dirOrder[i] = dirOrder[j]; dirOrder[j] = t;
+  }
+  for (let i = 0; i < PRIMARY_COUNT; i++) {
+    branches.push({
+      x: sx, y: sy, z: sz,
+      dir: dirOrder[i % 6],
+      depth: 0,
+      life: BRANCH_LIFE
+    });
+  }
+
+  // Per-depth-shell occupancy counter — used to reject new steps into a
+  // shell that's already at MAX_PER_SHELL. Keeps tendrils thin.
+  const shellCount = new Map();
+  shellCount.set(0, 1);     // soma occupies depth 0
+
+  // Iterate until we have enough nodes or all branches died.
+  let safety = targetNodes * 4;     // hard guard against runaway loops
+  while (nodes.length < targetNodes && branches.length > 0 && safety-- > 0) {
+    for (let bi = branches.length - 1; bi >= 0; bi--) {
+      if (nodes.length >= targetNodes) break;
+      const b = branches[bi];
+      if (b.life <= 0) { branches.splice(bi, 1); continue; }
+
+      // Pick this step's direction. With TURN_PROB chance, swap to a
+      // perpendicular axis (90° turn). Otherwise continue straight.
+      let stepDir = b.dir;
+      if (burstRand() < TURN_PROB) {
+        const perps = _PERP[_DIRS.indexOf(b.dir)];
+        stepDir = perps[Math.floor(burstRand() * perps.length)];
+      }
+
+      // Try the step. If blocked (out-of-bounds or visited), try one
+      // alternative direction once, else this branch dies.
+      let nx = b.x + stepDir.dx;
+      let ny = b.y + stepDir.dy;
+      let nz = b.z + stepDir.dz;
+      let nvi = voxInBounds(nx, ny, nz) ? voxIdx(nx, ny, nz) : -1;
+      if (nvi === -1 || visited.has(nvi)) {
+        // Try a different direction
+        let recovered = false;
+        for (let k = 0; k < 6; k++) {
+          const alt = _DIRS[(Math.floor(burstRand() * 6))];
+          if (alt === stepDir) continue;
+          const ax = b.x + alt.dx, ay = b.y + alt.dy, az = b.z + alt.dz;
+          if (!voxInBounds(ax, ay, az)) continue;
+          const avi = voxIdx(ax, ay, az);
+          if (visited.has(avi)) continue;
+          stepDir = alt; nx = ax; ny = ay; nz = az; nvi = avi;
+          recovered = true;
+          break;
+        }
+        if (!recovered) { branches.splice(bi, 1); continue; }
+      }
+
+      // Per-shell cap — if this depth is already full, kill the branch.
+      // Forces thin tendrils instead of bushy shells.
+      const newDepth = b.depth + 1;
+      const occ = shellCount.get(newDepth) || 0;
+      if (occ >= MAX_PER_SHELL) { branches.splice(bi, 1); continue; }
+
+      // Advance
+      b.x = nx; b.y = ny; b.z = nz;
+      b.dir = stepDir;
+      b.depth = newDepth;
+      b.life--;
+      visited.add(nvi);
+      nodes.push(nvi);
+      depths.push(newDepth);
+      shellCount.set(newDepth, occ + 1);
+      if (newDepth > maxDepth) maxDepth = newDepth;
+
+      // Possible split — spawn a sub-branch in a perpendicular direction.
+      // Only past depth 4 (splits at the soma turn into bushy core) and
+      // bounded by MAX_BRANCHES so total live arms stays manageable.
+      if (newDepth > 4 && burstRand() < SPLIT_PROB && branches.length < MAX_BRANCHES) {
+        const perps = _PERP[_DIRS.indexOf(stepDir)];
+        const splitDir = perps[Math.floor(burstRand() * perps.length)];
+        branches.push({
+          x: nx, y: ny, z: nz,
+          dir: splitDir,
+          depth: newDepth,
+          life: Math.max(8, (b.life * 0.65) | 0)
+        });
+      }
     }
   }
 
