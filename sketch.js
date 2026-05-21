@@ -154,8 +154,8 @@ function _spawnBandBurst(bandIdx, intensity) {
       kind: "band",
       label: r.name,
       intensity,
-      lifespan: r.group === "bass" ? 110 : r.group === "high" ? 55 : 80,
-      apFrames: r.group === "bass" ? 26 : r.group === "high" ? 14 : 18,
+      lifespan: r.group === "bass" ? 115 : r.group === "high" ? 60 : 85,
+      apFrames: r.group === "bass" ? 36 : r.group === "high" ? 18 : 24,
       targetNodes: Math.round((r.group === "bass" ? 130 : r.group === "high" ? 70 : 100) * _GRID_TREE_SCALE)
     }
   );
@@ -191,13 +191,13 @@ function _spawnEntityBurst(name, intensity) {
   // Per-entity tuning: kick is slow + chunky, hat is fast + thin, etc.
   // treeLen scales with _GRID_TREE_SCALE so density stays consistent.
   const profiles = {
-    kick:  { lifespan: 95,  apFrames: 22, nodes: 130 },
-    snare: { lifespan: 65,  apFrames: 16, nodes: 95  },
-    hat:   { lifespan: 38,  apFrames: 10, nodes: 70  },
-    voice: { lifespan: 80,  apFrames: 24, nodes: 110 },
-    brass: { lifespan: 90,  apFrames: 28, nodes: 120 },
-    synth: { lifespan: 110, apFrames: 32, nodes: 130 },
-    pad:   { lifespan: 140, apFrames: 40, nodes: 140 }
+    kick:  { lifespan: 100, apFrames: 32, nodes: 130 },
+    snare: { lifespan: 70,  apFrames: 22, nodes: 95  },
+    hat:   { lifespan: 45,  apFrames: 14, nodes: 70  },
+    voice: { lifespan: 90,  apFrames: 30, nodes: 110 },
+    brass: { lifespan: 100, apFrames: 36, nodes: 120 },
+    synth: { lifespan: 120, apFrames: 40, nodes: 130 },
+    pad:   { lifespan: 150, apFrames: 48, nodes: 140 }
   };
   const prof = profiles[name];
   spawnBurst(somaPos, somaColor, sec, {

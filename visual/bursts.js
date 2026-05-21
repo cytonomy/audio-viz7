@@ -139,13 +139,24 @@ class Burst {
     if (env < 0) env = 0;
     const energy = this.intensity * env;
 
+    // Advance the AP wavefront FIRST so structure + signal both see the new
+    // wave position this frame.
+    if (this.apProg < 1) {
+      this.apProg = Math.min(1, this.apProg + 1 / this.apFrames);
+    }
+    const waveDepth = this.apProg * (this.maxDepth + 1);
+
     const N = this.nodes.length;
 
-    // Soma + inner-shell structure brightness. Falls off with depth so
-    // tendril tips read as faint, the core stays bright.
-    const structFalloff = 0.55;
+    // Dendrite structure pass — voxels are ONLY lit once the wavefront has
+    // reached their depth. That's the "grow" effect: as the wave expands
+    // outward over apFrames frames, more of the tree becomes visible.
+    // Voxels ahead of the wave stay dark — they "haven't grown yet."
+    // Brightness still tapers with depth so tips read as faint.
+    const structFalloff = 0.5;
     for (let i = 0; i < N; i++) {
       const d = this.depths[i];
+      if (d > waveDepth) continue;                         // not yet grown
       const t = d / this.maxDepth;
       const want = energy * (1 - t * structFalloff);
       const vi = this.nodes[i];
@@ -153,22 +164,17 @@ class Burst {
       paintVoxelColor(vi, this.colors[i]);
     }
 
-    // Action potential: a spherical wavefront expanding outward through
-    // depth shells. waveDepth advances each frame from 0 toward maxDepth+1.
-    // Voxels within W depth-units of the wave glow brightly in voxSignal;
-    // trailing edge is brighter than leading edge so the wave reads as a
-    // moving shell, not a single point.
+    // Action potential pass — bright shell at the wavefront so the GROWING
+    // TIP of every branch glows extra brightly. Width is narrow (1.6 depth
+    // units) so it reads as a thin advancing edge, not a thick blob.
     if (this.apProg < 1) {
-      this.apProg = Math.min(1, this.apProg + 1 / this.apFrames);
-      const waveDepth = this.apProg * (this.maxDepth + 1);
-      const W = 2.0;
+      const W = 1.6;
       for (let i = 0; i < N; i++) {
         const d = this.depths[i];
         const dist = Math.abs(d - waveDepth);
         if (dist >= W) continue;
         const falloff = 1 - dist / W;
-        const trailing = d <= waveDepth ? 1 : 0.6;       // ahead-of-wave dimmer
-        const want = energy * falloff * trailing * 1.15;
+        const want = energy * falloff * 1.3;
         const vi = this.nodes[i];
         if (voxSignal[vi] < want) voxSignal[vi] = want;
       }
