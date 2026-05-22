@@ -5,10 +5,62 @@
 // radial explosion of dendrites in all directions, no two ever the same
 // shape.
 //
-// Per-burst color diffusion (v6 aesthetic): the soma + inner shells are
-// the source's primary color; outer shells lerp toward a "secondary"
-// color taken from a v6 palette neighbor. So each burst reads as a
-// colored core radiating into a different hue at its branch tips.
+// Per-source 5-stop radial palettes (core → tip). Each entity gets its own
+// distinct color identity so the user can SEE which instrument fired from
+// hue alone. Voice can be pitch-modulated by passing dynamicPalette in
+// spawnBurst opts (synthesized in sketch.js from voiceF0).
+//
+// Stops are ordered inner-shell → outer-tip. Bursts lerp through them as
+// t = depth / maxDepth.
+const PALETTES = {
+  // Bands stay on the original warm spectrum — neutral backdrop chatter.
+  band:  [[180,  20,  80], [255,  40,  20], [255, 140,  30], [255, 230,  50], [110, 230,  70]],
+
+  // Kick — fire/lava: deep blood-red core radiating to ember white-yellow tips.
+  kick:  [[ 90,   8,  10], [200,  30,  10], [255, 110,  20], [255, 200,  60], [255, 245, 200]],
+
+  // Snare — electric crack: cool white core with cyan/blue tendrils.
+  snare: [[240, 250, 255], [180, 220, 255], [120, 180, 240], [ 60, 130, 220], [ 30,  80, 180]],
+
+  // Hat — sparkle: bright cyan-white core fading to lavender/pink tips.
+  hat:   [[220, 250, 255], [255, 255, 255], [240, 200, 255], [200, 120, 230], [140,  60, 200]],
+
+  // Voice — warm human (default; pitch-modulated palette overrides per-burst).
+  voice: [[ 60,  20,  10], [180,  70,  40], [255, 170, 100], [255, 220, 180], [255, 245, 220]],
+
+  // Brass — copper/gold: dark amber to molten gold to bright cream.
+  brass: [[ 70,  25,   0], [180,  80,  20], [255, 160,  40], [255, 220,  80], [255, 250, 200]],
+
+  // Synth — synthetic purple/magenta: deep violet to hot pink to white.
+  synth: [[ 30,   0,  70], [110,  20, 180], [200,  60, 230], [255, 130, 240], [255, 220, 255]],
+
+  // Pad — ambient ocean: deep teal/blue to soft mint at the tips.
+  pad:   [[  8,  30,  60], [ 30,  90, 140], [ 70, 180, 200], [140, 230, 200], [220, 255, 230]]
+};
+
+// Lerp a 5-stop palette at parameter t in [0,1].
+function _lerpPalette(pal, t) {
+  if (t <= 0) return pal[0].slice();
+  if (t >= 1) return pal[pal.length - 1].slice();
+  const segs = pal.length - 1;
+  const f = t * segs;
+  const lo = Math.floor(f);
+  const u = f - lo;
+  const a = pal[lo];
+  const b = pal[lo + 1];
+  return [
+    a[0] * (1 - u) + b[0] * u,
+    a[1] * (1 - u) + b[1] * u,
+    a[2] * (1 - u) + b[2] * u
+  ];
+}
+
+// Named-palette sampler used by Burst at construction. paletteKey is one of
+// the keys of PALETTES; unknown keys fall back to 'band'.
+function sampleRadialPalette(t, paletteKey) {
+  const pal = (paletteKey && PALETTES[paletteKey]) || PALETTES.band;
+  return _lerpPalette(pal, t);
+}
 
 const BURSTS = [];
 const BURST_CAP = 80;
@@ -198,19 +250,19 @@ class Burst {
     this.depths = grown.depths;
     this.maxDepth = grown.maxDepth;
 
-    // Precompute per-node color: lerp soma → secondary by depth/maxDepth.
-    // Soma + inner shells are pure soma color; outer shells diffuse toward
-    // the secondary hue. Per-shell coloring, not per-path-index — gives the
-    // "expanding colored shockwave" feel.
+    // Per-node color: 5-stop radial palette indexed by depth/maxDepth.
+    // paletteKey selects from PALETTES (kick/snare/voice/etc.), OR caller
+    // may pass dynamicPalette: a 5-stop [[r,g,b],...] to override (used for
+    // pitch-modulated voice). somaColor/secondaryColor still accepted for
+    // backward-compat with the spawn API but ignored.
     const N = this.nodes.length;
     this.colors = new Array(N);
+    const pal = (o.dynamicPalette && o.dynamicPalette.length === 5)
+              ? o.dynamicPalette
+              : ((PALETTES[o.paletteKey]) || PALETTES.band);
     for (let i = 0; i < N; i++) {
       const t = this.depths[i] / this.maxDepth;
-      this.colors[i] = [
-        somaColor[0] * (1 - t) + secondaryColor[0] * t,
-        somaColor[1] * (1 - t) + secondaryColor[1] * t,
-        somaColor[2] * (1 - t) + secondaryColor[2] * t
-      ];
+      this.colors[i] = _lerpPalette(pal, t);
     }
   }
 

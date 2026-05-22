@@ -6,11 +6,11 @@
 // Each frame, every voxel reads structure[vi] + signal[vi] and the renderer
 // turns the sum into a colored, bloomed dot.
 
-// Grid resolution. 32³ = 32768 voxels — 8× denser than the v7.0 default.
+// Grid resolution. 46³ = 97336 voxels — ~3× the count vs GRID=32 (32768).
 // SPACING auto-scales so the on-screen cube stays roughly the same physical
 // size regardless of grid; the renderer's lit-voxel pre-filter keeps per-
 // frame draw cost bounded even at this resolution.
-const VOXEL_GRID = 32;
+const VOXEL_GRID = 46;
 const VOXEL_SPACING = Math.max(6, Math.floor(350 / VOXEL_GRID));   // ≈11 at GRID=32
 const VOXEL_COUNT = VOXEL_GRID * VOXEL_GRID * VOXEL_GRID;
 

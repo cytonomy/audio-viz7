@@ -23,22 +23,31 @@ let hudEl, entitiesEl, startEl;
 let hudVisible = false;
 
 // ─── Per-source spawn state ─────────────────────────────────────────
-// Edge-cross + refractory per band. Bursts spawn when a band's
-// relativeEnergy crosses the SPAWN_LEVEL and the band's refractory has
-// expired. While energy stays above SPAWN_LEVEL, re-spawn every
-// SUSTAIN_INTERVAL frames so sustained loud bands keep firing.
+// Edge-cross + refractory per band, with energy ACCUMULATION between bursts.
+// Each frame we add the band's relativeEnergy into bandEnergyAccum[i].
+// When the band crosses SPAWN_LEVEL and refractory is clear, we fire with
+// intensity = saturating function of the accumulator, then reset it.
+// Net effect: a brief loud band fires a small burst; sustained loud bands
+// fire larger bursts ("batched/aggregated signal"). Sustain re-fire disabled
+// (set to a very large number) so every burst feels like a discrete event.
 const BAND_SPAWN_LEVEL = 1.2;        // (relativeEnergy units; 1.0 = at threshold)
-const BAND_REFRACTORY = 8;           // frames between bursts per band
-const BAND_SUSTAIN_INTERVAL = 14;    // re-spawn cadence on held energy
+const BAND_REFRACTORY = 36;          // 3× prior — slow cadence per band
+const BAND_SUSTAIN_INTERVAL = 9999;  // disabled — no sustain re-fires
+const BAND_ACCUM_SAT = 24;           // accumulator (units of above-threshold re·frames) → intensity 1.0
 const bandLastSpawn = new Array(14).fill(-999);
 const bandWasAbove = new Array(14).fill(false);
+const bandEnergyAccum = new Array(14).fill(0);
 
-const ENTITY_SPAWN_LEVEL = 0.32;     // 0..1 in entityFireLevels space
-const ENTITY_REFRACTORY = {          // frames between bursts per entity
-  kick: 7, snare: 6, hat: 4, voice: 10, brass: 12, synth: 18, pad: 30
+const ENTITY_SPAWN_LEVEL = 0.55;     // raised — entity needs decisive trigger
+const ENTITY_REFRACTORY = {          // 3× prior values — slower cadence
+  kick: 21, snare: 18, hat: 12, voice: 30, brass: 36, synth: 54, pad: 90
 };
+const ENTITY_ACCUM_SAT = 2;          // accumulator (units of above-threshold lv·frames) → intensity 1.0
 const entityLastSpawn = {
   kick: -999, snare: -999, hat: -999, voice: -999, brass: -999, synth: -999, pad: -999
+};
+const entityEnergyAccum = {
+  kick: 0, snare: 0, hat: 0, voice: 0, brass: 0, synth: 0, pad: 0
 };
 let frameTickV7 = 0;                 // local frame counter independent of p5's
 
@@ -56,6 +65,13 @@ const entityHomes = {
   pad:   { x: -0.3, y: -0.25, z: -0.15 }
 };
 const BURST_JITTER_FRAC = 0.28;     // fraction of grid half-extent — visible spread
+
+// Global silence gate: blocks burst spawning when room is below this RMS.
+// Prevents mic-on / no-audio ambient (HVAC, keyboard, fan) from crossing per-
+// band thresholds and firing false bursts. Entities already have their own
+// SILENCE_RMS gate in entities.js (0.005); this is a redundant outer guard
+// applied uniformly to bands + entities.
+const SILENCE_GATE_RMS = 0.012;
 
 function setup() {
   createCanvas(windowWidth, windowHeight, WEBGL);
@@ -101,22 +117,36 @@ function draw() {
 }
 
 // ─── Band burst spawning ────────────────────────────────────────────
-// For each band, fire a burst on threshold-cross (rising edge) and re-fire
-// periodically while sustained. Burst color = band's v6 hue; secondary =
-// the neighboring band's hue (color diffusion follows v6's color wheel).
+// For each band: accumulate relativeEnergy every frame; on threshold-cross
+// (rising edge, refractory clear) fire with intensity = accumulator / SAT,
+// then reset accumulator. Color is the global radial palette — no band hue.
 function spawnFromBands() {
   if (mutebands) return;
+  if (rms < SILENCE_GATE_RMS) {
+    // Below silence floor — also drain accumulators so a long quiet pause
+    // doesn't leave residual energy that pops on the first real signal.
+    for (let i = 0; i < bandEnergyAccum.length; i++) bandEnergyAccum[i] = 0;
+    return;
+  }
   for (let i = 0; i < frequencyRanges.length; i++) {
     const r = frequencyRanges[i];
     const re = r.relativeEnergy || 0;
     const above = re > BAND_SPAWN_LEVEL;
+    // Only accumulate ABOVE-threshold energy — ambient quiet bands don't pool.
+    if (above) bandEnergyAccum[i] += (re - BAND_SPAWN_LEVEL);
     const sinceLast = frameTickV7 - bandLastSpawn[i];
     const isRisingEdge = above && !bandWasAbove[i] && sinceLast > BAND_REFRACTORY;
     const isSustainTick = above && bandWasAbove[i] && sinceLast > BAND_SUSTAIN_INTERVAL;
     if (isRisingEdge || isSustainTick) {
-      const intensity = Math.min(1, re / 3.5);   // re ~3.5 → full intensity
+      // Hybrid intensity: max of (current spike loudness) and (accumulated
+      // above-threshold energy). Single sharp transients still register;
+      // sustained loud periods get the accumulation bonus.
+      const peakIntensity = Math.min(1, (re - BAND_SPAWN_LEVEL) / 2.5);
+      const accumIntensity = Math.min(1, bandEnergyAccum[i] / BAND_ACCUM_SAT);
+      const intensity = Math.max(peakIntensity, accumIntensity);
       _spawnBandBurst(i, intensity);
       bandLastSpawn[i] = frameTickV7;
+      bandEnergyAccum[i] = 0;
     }
     bandWasAbove[i] = above;
   }
@@ -126,70 +156,113 @@ function spawnFromBands() {
 // burst stays consistent regardless of how many LEDs the cube has.
 const _GRID_TREE_SCALE = VOXEL_GRID / 16;       // 1 at GRID=16, 2 at GRID=32
 
-function _spawnBandBurst(bandIdx, intensity) {
-  const r = frequencyRanges[bandIdx];
-  const neighbor = frequencyRanges[(bandIdx + 1) % frequencyRanges.length];
+// Band bursts spawn from cube center (±small jitter) — they're the
+// "background spectrum chatter" layer, deliberately overlapping at the
+// core so they don't compete with the entity bursts visually.
+const CENTER_JITTER = 1.5;
+function _centerSoma() {
   const cx = (VOXEL_GRID - 1) / 2;
   const cy = (VOXEL_GRID - 1) / 2;
   const cz = (VOXEL_GRID - 1) / 2;
-  // Soma position: angular ring (color-wheel layout) with wide ±0.6 rad
-  // jitter so the band can land anywhere within roughly half its sector.
-  // Radius spans 30%-90% of the cube — sometimes deep in the core, sometimes
-  // out near the shell. Each burst lands somewhere noticeably different.
-  const angle = (bandIdx / frequencyRanges.length) * Math.PI * 2
-              + (Math.random() - 0.5) * 1.2;
-  const baseR = (VOXEL_GRID / 2 - 2);
-  const radius = baseR * (0.3 + Math.random() * 0.65);
-  const yJ = Math.max(3, Math.round(VOXEL_GRID * 0.25));
-  const yOffset = r.group === "bass" ? Math.round(VOXEL_GRID * 0.15)
-                : r.group === "high" ? -Math.round(VOXEL_GRID * 0.15) : 0;
-  const sx = _clamp(Math.round(cx + Math.cos(angle) * radius));
-  const sy = _clamp(Math.round(cy + yOffset + (Math.random() - 0.5) * yJ));
-  const sz = _clamp(Math.round(cz + Math.sin(angle) * radius));
+  return {
+    x: _clamp(Math.round(cx + (Math.random() - 0.5) * CENTER_JITTER * 2)),
+    y: _clamp(Math.round(cy + (Math.random() - 0.5) * CENTER_JITTER * 2)),
+    z: _clamp(Math.round(cz + (Math.random() - 0.5) * CENTER_JITTER * 2))
+  };
+}
+
+// Entity bursts spawn at a random position within the entity's "zone" —
+// each instrument gets its own neighborhood of the cube (kick low, hat
+// high, voice back, brass left, etc.) with WIDE jitter so each new burst
+// of the same instrument hops to a different spot within its zone. The
+// visual effect: each instrument looks like a separate moving cluster.
+const ENTITY_ZONE_JITTER_FRAC = 0.50;     // ±50% of grid half-extent
+function _entityZoneSoma(name) {
+  const h = entityHomes[name];
+  if (!h) return _centerSoma();
+  const half = VOXEL_GRID / 2;
+  const cx = (VOXEL_GRID - 1) / 2;
+  const cy = (VOXEL_GRID - 1) / 2;
+  const cz = (VOXEL_GRID - 1) / 2;
+  const jit = half * ENTITY_ZONE_JITTER_FRAC;
+  return {
+    x: _clamp(Math.round(cx + h.x * half + (Math.random() - 0.5) * jit * 2)),
+    y: _clamp(Math.round(cy + h.y * half + (Math.random() - 0.5) * jit * 2)),
+    z: _clamp(Math.round(cz + h.z * half + (Math.random() - 0.5) * jit * 2))
+  };
+}
+
+// Pitch-modulated voice palette. When pitchy reports a confident f0, build
+// a 5-stop gradient around an f0-derived base hue (low pitch = warm yellow,
+// high pitch = cool magenta). Falls back to null when no pitch is available
+// → Burst then uses the default static voice palette.
+function _voicePaletteForPitch() {
+  const f0 = (typeof window.voiceF0 === 'number') ? window.voiceF0 : voiceF0;
+  const clarity = (typeof window.voicePitchClarity === 'number') ? window.voicePitchClarity : voicePitchClarity;
+  if (!f0 || f0 < 80 || !clarity || clarity < 0.5) return null;
+  // 80-500 Hz → hue 60° (yellow) to 300° (magenta).
+  const t = Math.min(1, Math.max(0, (f0 - 80) / 420));
+  const baseHue = 60 + t * 240;
+  // Synthesize 5 stops sweeping lightness around the base hue, with the
+  // outer stops slightly shifted toward complementary so the gradient
+  // reads as a colored corona rather than a single hue everywhere.
+  return [
+    hslToRgb(baseHue + 30, 80, 22),
+    hslToRgb(baseHue + 12, 85, 40),
+    hslToRgb(baseHue,      90, 60),
+    hslToRgb(baseHue - 22, 78, 76),
+    hslToRgb(baseHue - 45, 65, 88)
+  ];
+}
+
+function _spawnBandBurst(bandIdx, intensity) {
+  const r = frequencyRanges[bandIdx];
+  const baseNodes = r.group === "bass" ? 130 : r.group === "high" ? 70 : 100;
   spawnBurst(
-    { x: sx, y: sy, z: sz },
+    _centerSoma(),
     r.rgb,
-    neighbor.rgb,
+    r.rgb,
     {
       kind: "band",
       label: r.name,
       intensity,
+      paletteKey: "band",
       lifespan: r.group === "bass" ? 115 : r.group === "high" ? 60 : 85,
       apFrames: r.group === "bass" ? 36 : r.group === "high" ? 18 : 24,
-      targetNodes: Math.round((r.group === "bass" ? 130 : r.group === "high" ? 70 : 100) * _GRID_TREE_SCALE)
+      targetNodes: Math.round(baseNodes * _GRID_TREE_SCALE * (0.6 + intensity * 1.2))
     }
   );
 }
 
 // ─── Entity burst spawning ──────────────────────────────────────────
+// Accumulate per-entity fire level every frame; on threshold-cross + refractory
+// clear, fire with intensity = accumulator / SAT. Bigger accumulator → bigger
+// burst. Reset after spawn.
 function spawnFromEntities(fires) {
+  if (rms < SILENCE_GATE_RMS) {
+    for (const name in entityEnergyAccum) entityEnergyAccum[name] = 0;
+    return;
+  }
   for (const name in entityHomes) {
     const lv = fires[name] || 0;
+    // Only accumulate above-threshold contributions so ambient noise doesn't pool.
+    if (lv > ENTITY_SPAWN_LEVEL) entityEnergyAccum[name] += (lv - ENTITY_SPAWN_LEVEL);
     if (lv < ENTITY_SPAWN_LEVEL) continue;
     if (frameTickV7 - entityLastSpawn[name] < ENTITY_REFRACTORY[name]) continue;
-    _spawnEntityBurst(name, lv);
+    // Hybrid intensity (see spawnFromBands): max of current spike and accumulator.
+    const peakIntensity = Math.min(1, (lv - ENTITY_SPAWN_LEVEL) / 0.4);
+    const accumIntensity = Math.min(1, entityEnergyAccum[name] / ENTITY_ACCUM_SAT);
+    const intensity = Math.max(peakIntensity, accumIntensity);
+    _spawnEntityBurst(name, intensity);
     entityLastSpawn[name] = frameTickV7;
+    entityEnergyAccum[name] = 0;
   }
 }
 
 function _spawnEntityBurst(name, intensity) {
-  const h = entityHomes[name];
-  const half = VOXEL_GRID / 2;
-  const cx = (VOXEL_GRID - 1) / 2;
-  const cy = (VOXEL_GRID - 1) / 2;
-  const cz = (VOXEL_GRID - 1) / 2;
-  const jit = half * BURST_JITTER_FRAC;
-  const sx = _clamp(Math.round(cx + h.x * half + (Math.random() - 0.5) * jit * 2));
-  const sy = _clamp(Math.round(cy + h.y * half + (Math.random() - 0.5) * jit * 2));
-  const sz = _clamp(Math.round(cz + h.z * half + (Math.random() - 0.5) * jit * 2));
-  const somaPos = { x: sx, y: sy, z: sz };
   const somaColor = entityPalette[name];
-  // Pick a v6 palette color as the secondary — random per spawn so each
-  // burst's diffusion picks a different neighbor hue. Gives each kick (etc.)
-  // a unique color signature without losing its primary identity.
-  const sec = frequencyRanges[Math.floor(Math.random() * frequencyRanges.length)].rgb;
   // Per-entity tuning: kick is slow + chunky, hat is fast + thin, etc.
-  // treeLen scales with _GRID_TREE_SCALE so density stays consistent.
+  // targetNodes scales with intensity so accumulated bursts grow up to 2.4×.
   const profiles = {
     kick:  { lifespan: 100, apFrames: 32, nodes: 130 },
     snare: { lifespan: 70,  apFrames: 22, nodes: 95  },
@@ -200,13 +273,17 @@ function _spawnEntityBurst(name, intensity) {
     pad:   { lifespan: 150, apFrames: 48, nodes: 140 }
   };
   const prof = profiles[name];
-  spawnBurst(somaPos, somaColor, sec, {
+  // Voice gets a pitch-modulated palette if pitchy is loaded + confident.
+  const dynamicPalette = name === 'voice' ? _voicePaletteForPitch() : null;
+  spawnBurst(_entityZoneSoma(name), somaColor, somaColor, {
     kind: "entity",
     label: name,
     intensity,
+    paletteKey: name,
+    dynamicPalette,
     lifespan: prof.lifespan,
     apFrames: prof.apFrames,
-    targetNodes: Math.round(prof.nodes * _GRID_TREE_SCALE)
+    targetNodes: Math.round(prof.nodes * _GRID_TREE_SCALE * (0.6 + intensity * 1.2))
   });
 }
 

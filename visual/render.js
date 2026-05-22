@@ -18,7 +18,7 @@ const RENDER_BG = [4, 4, 8];
 const RENDER_BLOOM_THRESH = 0.06;       // bloom now fires for nearly all lit voxels
 const RENDER_CORE_THRESH  = 0.018;      // global "is this voxel worth drawing"
 const RENDER_HOT_THRESH   = 0.55;       // hot-white peak only for AP heads
-const MAX_RENDER_VOXELS   = 1800;       // hard cap on draw budget per frame
+const MAX_RENDER_VOXELS   = 5400;       // hard cap on draw budget per frame (3× to match GRID=46)
 
 // Reusable scratch buffer — avoid GC pressure by holding a flat lit-list
 // across frames. Each entry is 6 contiguous numbers:
