@@ -18,15 +18,14 @@ const RENDER_BG = [4, 4, 8];
 const RENDER_BLOOM_THRESH = 0.06;       // bloom now fires for nearly all lit voxels
 const RENDER_CORE_THRESH  = 0.018;      // global "is this voxel worth drawing"
 const RENDER_HOT_THRESH   = 0.55;       // hot-white peak only for AP heads
-const MAX_RENDER_VOXELS   = 5400;       // hard cap on draw budget per frame (3× to match GRID=46)
+const MAX_RENDER_VOXELS   = 40000;      // hard cap on draw budget per frame (sized for GRID=160)
 
 // Reusable scratch buffer — avoid GC pressure by holding a flat lit-list
-// across frames. Each entry is 6 contiguous numbers:
-//   [voxIdx, total-brightness, signal-brightness, r, g, b]
-// Tracking signal separately lets the render pass distinguish persistent
-// dendrite trail (structure-only) from AP wavefront (signal-heavy), so
-// branches read as clean dot-lines while growing tips burst with glow.
-const _litBuf = new Float32Array(MAX_RENDER_VOXELS * 6);
+// across frames. Each entry is 7 contiguous numbers:
+//   [voxIdx, total-brightness, signal-brightness, r, g, b, depthFrac]
+// depthFrac (0=core, 1=tip) drives a per-voxel thickness multiplier so
+// trunks render fat and tips render fine.
+const _litBuf = new Float32Array(MAX_RENDER_VOXELS * 7);
 let _litCount = 0;
 // Adaptive brightness threshold. Starts at RENDER_CORE_THRESH and creeps
 // upward whenever a frame fills the lit-buffer to capacity (so the dimmest
@@ -65,7 +64,7 @@ function renderVoxels(p, _hideBandUnused) {
     if (b < thresh) continue;
 
     if (count < cap) {
-      const w = count * 6;
+      const w = count * 7;
       const ci = i * 3;
       buf[w]     = i;
       buf[w + 1] = b;
@@ -73,6 +72,7 @@ function renderVoxels(p, _hideBandUnused) {
       buf[w + 3] = voxColor[ci];
       buf[w + 4] = voxColor[ci + 1];
       buf[w + 5] = voxColor[ci + 2];
+      buf[w + 6] = voxDepth[i];                  // 0..255 depth byte
       count++;
     }
     // else: skip and let _dynThresh climb next frame so the dimmest go first
@@ -100,13 +100,19 @@ function renderVoxels(p, _hideBandUnused) {
   p.noFill();
 
   for (let i = 0; i < count; i++) {
-    const w = i * 6;
+    const w = i * 7;
     const vi = buf[w] | 0;
     const b = buf[w + 1];
     const sig = buf[w + 2];
     const r = buf[w + 3];
     const g = buf[w + 4];
     const bl = buf[w + 5];
+    const depthFrac = buf[w + 6] / 255;          // 0=core, 1=tip
+
+    // Per-voxel thickness multiplier from depth: fat trunk (2.2× at core)
+    // fining out to thin tips (0.55× at tip). Applied to core dot, bloom
+    // halo, AND atmospheric glow so the gradient compounds across passes.
+    const thickMult = 2.2 - depthFrac * 1.65;
 
     // (x,y,z) from flat index, layout z*G² + y*G + x
     const z = (vi / (G * G)) | 0;
@@ -120,7 +126,7 @@ function renderVoxels(p, _hideBandUnused) {
     // Atmospheric glow — gated on signal strength. Only AP-wavefront
     // voxels emit the wide halo. Persistent dendrite voxels stay sharp.
     if (sig > 0.12) {
-      p.strokeWeight(sig * 26 + 8);
+      p.strokeWeight((sig * 26 + 8) * thickMult);
       p.stroke(r, g, bl, sig * 22);
       p.point(px, py, pz);
     }
@@ -128,14 +134,14 @@ function renderVoxels(p, _hideBandUnused) {
     // Inner bloom halo — for any voxel above a moderate brightness.
     // Tighter than before so the structure trail isn't fogged out.
     if (b >= RENDER_BLOOM_THRESH || sig > 0.08) {
-      p.strokeWeight(b * 9 + 3);
+      p.strokeWeight((b * 9 + 3) * thickMult);
       p.stroke(r, g, bl, b * 38);
       p.point(px, py, pz);
     }
 
     // Core bright dot — every lit voxel. Smaller base size so the dendrite
     // structure reads as a chain of distinct dots, not a wash.
-    const coreSize = 1.5 + b * 4;
+    const coreSize = (1.5 + b * 4) * thickMult;
     p.strokeWeight(coreSize);
     p.stroke(r, g, bl, 80 + b * 175);
     p.point(px, py, pz);

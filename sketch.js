@@ -104,7 +104,8 @@ function draw() {
 
   // ─── Camera ─────────────────────────────────────────────────────
   const totalSize = VOXEL_GRID * VOXEL_SPACING;
-  const camDist = totalSize * 1.5 / camZoom;
+  // Camera distance multiplier — lower = closer = cube fills more viewport.
+  const camDist = totalSize * 0.55 / camZoom;
   if (!isDragging && !paused) camRotY += ROTATE_SPEED;
   const cosX = Math.cos(camRotX), sinX = Math.sin(camRotX);
   const camX = camDist * Math.sin(camRotY) * cosX;
@@ -227,8 +228,8 @@ function _spawnBandBurst(bandIdx, intensity) {
       label: r.name,
       intensity,
       paletteKey: "band",
-      lifespan: r.group === "bass" ? 115 : r.group === "high" ? 60 : 85,
-      apFrames: r.group === "bass" ? 36 : r.group === "high" ? 18 : 24,
+      lifespan: r.group === "bass" ? 195 : r.group === "high" ? 100 : 145,  // ↑ ~1.7× — bursts persist longer
+      apFrames: r.group === "bass" ? 81 : r.group === "high" ? 42 : 54,     // ↑ ~1.5× more — AP wave reveals tree slower
       targetNodes: Math.round(baseNodes * _GRID_TREE_SCALE * (0.6 + intensity * 1.2))
     }
   );
@@ -263,14 +264,18 @@ function _spawnEntityBurst(name, intensity) {
   const somaColor = entityPalette[name];
   // Per-entity tuning: kick is slow + chunky, hat is fast + thin, etc.
   // targetNodes scales with intensity so accumulated bursts grow up to 2.4×.
+  // Lifespan bumped ~1.7× and apFrames bumped ~1.5× — bursts persist longer
+  // and the AP wavefront reveals each tree more gradually. Trees feel like
+  // they unfold rather than snap into shape, and stay visible long enough to
+  // build up overlapping layers across the larger cube.
   const profiles = {
-    kick:  { lifespan: 100, apFrames: 32, nodes: 130 },
-    snare: { lifespan: 70,  apFrames: 22, nodes: 95  },
-    hat:   { lifespan: 45,  apFrames: 14, nodes: 70  },
-    voice: { lifespan: 90,  apFrames: 30, nodes: 110 },
-    brass: { lifespan: 100, apFrames: 36, nodes: 120 },
-    synth: { lifespan: 120, apFrames: 40, nodes: 130 },
-    pad:   { lifespan: 150, apFrames: 48, nodes: 140 }
+    kick:  { lifespan: 170, apFrames: 72,  nodes: 130 },
+    snare: { lifespan: 120, apFrames: 50,  nodes: 95  },
+    hat:   { lifespan: 75,  apFrames: 33,  nodes: 70  },
+    voice: { lifespan: 150, apFrames: 68,  nodes: 110 },
+    brass: { lifespan: 170, apFrames: 81,  nodes: 120 },
+    synth: { lifespan: 200, apFrames: 90,  nodes: 130 },
+    pad:   { lifespan: 250, apFrames: 108, nodes: 140 }
   };
   const prof = profiles[name];
   // Voice gets a pitch-modulated palette if pitchy is loaded + confident.

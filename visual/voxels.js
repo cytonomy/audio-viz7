@@ -6,12 +6,13 @@
 // Each frame, every voxel reads structure[vi] + signal[vi] and the renderer
 // turns the sum into a colored, bloomed dot.
 
-// Grid resolution. 46³ = 97336 voxels — ~3× the count vs GRID=32 (32768).
-// SPACING auto-scales so the on-screen cube stays roughly the same physical
-// size regardless of grid; the renderer's lit-voxel pre-filter keeps per-
-// frame draw cost bounded even at this resolution.
-const VOXEL_GRID = 46;
-const VOXEL_SPACING = Math.max(6, Math.floor(350 / VOXEL_GRID));   // ≈11 at GRID=32
+// Grid resolution. 160³ = 4,096,000 voxels — ~125× the v7.0 default (32³)
+// and 2.4× the prior GRID=120. Spacing locked so GRID grows the cube in
+// world units (160 × 5 = 800). The renderer's lit-voxel pre-filter
+// (MAX_RENDER_VOXELS) caps per-frame draws; the fast-reject path on zero
+// voxels keeps the prefilter loop tractable even at 4M voxels.
+const VOXEL_GRID = 160;
+const VOXEL_SPACING = 5;     // world-unit gap per LED; total cube = GRID × SPACING = 800
 const VOXEL_COUNT = VOXEL_GRID * VOXEL_GRID * VOXEL_GRID;
 
 // Allocated by initVoxels(), referenced from sketch.js / render.js / bursts.js.
@@ -20,11 +21,15 @@ const VOXEL_COUNT = VOXEL_GRID * VOXEL_GRID * VOXEL_GRID;
 let voxStructure;   // per-voxel dendrite intensity, 0..1
 let voxSignal;      // per-voxel action potential intensity, 0..1
 let voxColor;       // Uint8Array[VOXEL_COUNT * 3] RGB per voxel (last burst wins)
+let voxDepth;       // Uint8Array[VOXEL_COUNT] depth-from-soma fraction × 255
+                    //   0 = burst core, 255 = burst tip. Renderer uses this to
+                    //   scale dot strokeWeight so trunks render fat and tips fine.
 
 function initVoxels() {
   voxStructure = new Float32Array(VOXEL_COUNT);
   voxSignal    = new Float32Array(VOXEL_COUNT);
   voxColor     = new Uint8Array(VOXEL_COUNT * 3);
+  voxDepth     = new Uint8Array(VOXEL_COUNT);
 }
 
 // Flat-index helper. Matches volumetric-led layout: idx = z*G² + y*G + x.
@@ -52,11 +57,13 @@ function decayVoxels() {
   }
 }
 
-// Paint a voxel with a burst's per-step color. Last writer wins, so
-// overlapping bursts visibly recolor shared voxels.
-function paintVoxelColor(vi, rgb) {
+// Paint a voxel with a burst's per-step color + depth fraction. Last writer
+// wins, so overlapping bursts visibly recolor shared voxels and the most
+// recent burst's depth governs thickness at that pixel.
+function paintVoxelColor(vi, rgb, depthFrac) {
   const ci = vi * 3;
   voxColor[ci]     = rgb[0] | 0;
   voxColor[ci + 1] = rgb[1] | 0;
   voxColor[ci + 2] = rgb[2] | 0;
+  if (depthFrac !== undefined) voxDepth[vi] = (depthFrac * 255) | 0;
 }

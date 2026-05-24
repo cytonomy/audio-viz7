@@ -120,13 +120,16 @@ function _growExplosion(sx, sy, sz, targetNodes) {
   //   MAX_BRANCHES   — hard cap on simultaneous live tips
   //   MAX_PER_SHELL  — per-depth occupancy cap → keeps tendrils thin
   const PRIMARY_COUNT = 4 + Math.floor(burstRand() * 2);     // 4-5 arms
-  const TIP_SPEED = 0.42;
-  const SUB_STEPS = 3;
-  const PERTURB = 0.32;
-  const SPLIT_PROB = 0.04;
-  const BRANCH_LIFE = Math.max(60, Math.round(VOXEL_GRID * 3));
+  const TIP_SPEED = 0.22;                                    // ↓ from 0.32 — tips advance less per step (slower spread)
+  const SUB_STEPS = 4;                                       // ↑ from 3 — more perturbations per voxel = smoother curves
+  const PERTURB = 0.42;                                      // ↑ from 0.32 — more velocity jitter = more wandering / organic
+  const SPLIT_PROB = 0.07;                                   // ↑ from 0.04 — more forks = bushier organic trees
+  const BRANCH_LIFE = Math.max(120, Math.round(VOXEL_GRID * 1.7));  // ↑ — tips live longer, bursts persist
   const MAX_BRANCHES = 7;
-  const MAX_PER_SHELL = 8;
+  // Shell cap raised 8→12 so the bushier (higher SPLIT_PROB) trees actually
+  // have room to fork without choking. Thickness gradient is driven by per-
+  // voxel depthFrac in render.js, not by packing more voxels per shell.
+  const MAX_PER_SHELL = 12;
 
   // Active tips with continuous coords. Position starts at soma center
   // (+0.5 so floor(x) snaps to soma voxel).
@@ -292,8 +295,10 @@ class Burst {
     // reached their depth. That's the "grow" effect: as the wave expands
     // outward over apFrames frames, more of the tree becomes visible.
     // Voxels ahead of the wave stay dark — they "haven't grown yet."
-    // Brightness still tapers with depth so tips read as faint.
-    const structFalloff = 0.5;
+    // Brightness tapers with depth so tips read as faint. paintVoxelColor
+    // also stashes depthFrac into voxDepth so the renderer can scale dot
+    // thickness (thick core, fine tips).
+    const structFalloff = 0.55;
     for (let i = 0; i < N; i++) {
       const d = this.depths[i];
       if (d > waveDepth) continue;                         // not yet grown
@@ -301,7 +306,7 @@ class Burst {
       const want = energy * (1 - t * structFalloff);
       const vi = this.nodes[i];
       if (voxStructure[vi] < want) voxStructure[vi] = want;
-      paintVoxelColor(vi, this.colors[i]);
+      paintVoxelColor(vi, this.colors[i], t);
     }
 
     // Action potential pass — bright shell at the wavefront so the GROWING
