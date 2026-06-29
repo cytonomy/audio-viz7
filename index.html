@@ -56,6 +56,21 @@
     #start.hidden { display: none; }
 
     canvas { display: block; }
+
+    /* ── Fullscreen toggle button (shared across the audio-viz series) ── */
+    #fsBtn {
+      position: fixed; bottom: 16px; right: 16px; z-index: 200;
+      width: 40px; height: 40px; padding: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(8,12,20,0.55); color: #8fb4d6;
+      border: 1px solid rgba(120,160,200,0.30); border-radius: 8px;
+      cursor: pointer; opacity: 0.45;
+      -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+      transition: opacity .2s, background .2s, color .2s, border-color .2s, transform .1s;
+    }
+    #fsBtn:hover { opacity: 1; background: rgba(18,26,40,0.85); color: #d6ecff; border-color: rgba(120,160,200,0.6); }
+    #fsBtn:active { transform: scale(0.94); }
+    #fsBtn svg { width: 20px; height: 20px; display: block; pointer-events: none; }
   </style>
 </head>
 <body>
@@ -84,6 +99,41 @@
 <script src="audio/entities.js?v=21"></script>
 <script type="module" src="audio/loaders.js?v=21"></script>
 <script src="sketch.js?v=21"></script>
+
+<!-- ── Fullscreen toggle (shared across the audio-viz series) ── -->
+<button id="fsBtn" title="Fullscreen (F)" aria-label="Toggle fullscreen">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/></svg>
+</button>
+<script>
+(function () {
+  var btn = document.getElementById('fsBtn');
+  if (!btn) return;
+  var EXPAND = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/></svg>';
+  var COMPRESS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v3a2 2 0 0 1-2 2H4M20 9h-3a2 2 0 0 1-2-2V4M15 20v-3a2 2 0 0 1 2-2h3M4 15h3a2 2 0 0 1 2 2v3"/></svg>';
+  function generic() {
+    var el = document.documentElement;
+    if (!document.fullscreenElement) {
+      (el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen).call(el);
+    } else {
+      (document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen).call(document);
+    }
+  }
+  // Don't let the click/drag reach p5's canvas handlers underneath.
+  ['mousedown', 'pointerdown', 'touchstart'].forEach(function (ev) {
+    btn.addEventListener(ev, function (e) { e.stopPropagation(); }, { passive: false });
+  });
+  btn.addEventListener('click', function (e) {
+    e.preventDefault(); e.stopPropagation();
+    // Prefer the project's own toggle (it may also manage HUD/cursor); else generic.
+    if (typeof window.toggleFullscreen === 'function') window.toggleFullscreen();
+    else if (typeof window._toggleFullscreen === 'function') window._toggleFullscreen();
+    else generic();
+  });
+  function syncIcon() { btn.innerHTML = document.fullscreenElement ? COMPRESS : EXPAND; }
+  document.addEventListener('fullscreenchange', syncIcon);
+  document.addEventListener('webkitfullscreenchange', syncIcon);
+})();
+</script>
 
 </body>
 </html>
